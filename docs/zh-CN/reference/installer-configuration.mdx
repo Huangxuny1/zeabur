@@ -137,8 +137,11 @@ installer 一定会创建 `local-path`，数据存放在节点的 `/var/lib/zeab
 | `host.tlsSan` | `[]`。Kubernetes API server 证书中额外添加的 DNS 名称或 IP 地址，仅用于 server |
 | `host.requireEncryptedDisk` | `false`。设为 `true` 时，如果根目录或数据目录不在加密设备上，`apply` 就会停止 |
 | `host.nodeName` | 主机名转为小写。主机名不能用作节点名称，或由 IP 地址组成（例如 `ip-10-0-0-5`）时，改用 `node-3f9a2c` 这类名称。installer 会将这个名称写入 K3s 或 RKE2 的配置，以后主机名改了，节点名称也不会跟着改变。只能使用小写字母、数字、`-` 和 `.` |
+| `host.gvisor` | `false`。设为 `true` 时，在每个节点安装 gVisor，并创建 `gvisor` RuntimeClass。工作负载用 `runtimeClassName: gvisor` 选择它。仅支持 installer 固定版本的 K3s 或 RKE2，主机需要 `tar` 和 `bzip2` |
 
 节点装好后会一直使用当初的名称。再次运行 `apply` 会沿用原来的名称；如果 `host.nodeName` 填了其他名称，`apply` 会停止，因为 Kubernetes 会把新名称当成同一地址上的第二个节点。
+
+gVisor 让工作负载使用自己的用户态内核，而不是宿主机的内核，从而缩小工作负载被攻破后能触及的范围。每个 Pod 会增加一些 CPU 和内存开销；如果工作负载需要设备或 gVisor 未实现的系统调用，就无法在它上面运行。`apply` 会在 K3s 或 RKE2 首次启动前安装固定版本的 gVisor；对已有集群会重启一次。`doctor` 会检查二进制文件、containerd drop-in 和 RuntimeClass。KubeSolo 的个人安装不接受 `host.gvisor`。
 
 ### `sources`
 
@@ -179,7 +182,7 @@ host:
   tlsSan: [solo.example.com]
 ```
 
-同一份文件只能再添加下表中的字段，不接受 `profile`、`access`、`zeabur`、`distribution`、`k3sVersion`、`rke2Version` 和 `join`。
+同一份文件只能再添加下表中的字段，不接受 `profile`、`access`、`zeabur`、`distribution`、`k3sVersion`、`rke2Version` 和 `join`。也不接受 `host.gvisor`：gVisor 需要 K3s 或 RKE2。
 
 | 字段 | 默认值与用途 |
 |---|---|
@@ -212,7 +215,7 @@ host:
 | `join.longhorn` | `false`。设为 `true` 时，在 K3s 或 RKE2 启动前安装好 Longhorn 所需的主机软件包 |
 | `join.nodeNames` | `[]`。集群中已有的节点名称，与 `node add` 打印的内容一致。新主机的名称已被使用时，节点会改用 `node-3f9a2c` 这类名称 |
 
-`host.nodeName` 的用法与创建集群时相同，但不能与 `join.nodeNames` 中的名称重复。worker 不接受 `host.tlsSan`。`distribution` 和版本必须与集群一致。worker 的 bootstrap token 不能用于加入 server，需要使用 `node add --role server` 生成的配置。
+`host.nodeName` 的用法与创建集群时相同，但不能与 `join.nodeNames` 中的名称重复。worker 不接受 `host.tlsSan`。集群使用 gVisor 时，`node add` 会一并输出 `host.gvisor`；请照原样保留，让新节点获得相同的运行时。`distribution` 和版本必须与集群一致。worker 的 bootstrap token 不能用于加入 server，需要使用 `node add --role server` 生成的配置。
 
 ## 配置无法使用时
 

@@ -15,7 +15,7 @@ use crate::catalog::{
 };
 use crate::cluster::{self, Distribution, HostFile};
 use crate::config::{AccessMode, Config, Sources};
-use crate::pins::{self, CALICO, K3S, K3s, RKE2};
+use crate::pins::{self, CALICO, GVISOR, K3S, K3s, RKE2};
 use crate::record::{Changes, Planned, Record};
 use crate::remove::Removal;
 use crate::select::{self, Selection, Target, Why};
@@ -124,6 +124,8 @@ pub struct Plan {
     pub node_name: String,
     /// The Kubernetes release.
     pub cluster: ClusterPlan,
+    /// gVisor, when `host.gvisor` is on.
+    pub gvisor: Option<GvisorPlan>,
     /// Calico's manifest, applied once K3s's API answers; `None` on RKE2, which brings Canal.
     pub calico: Option<Download>,
     /// Files written before K3s or RKE2 starts.
@@ -210,6 +212,65 @@ impl ClusterPlan {
             .chain(&self.images)
             .chain(&self.install_script)
     }
+}
+
+/// gVisor, when `host.gvisor` is on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GvisorPlan {
+    /// The release tag, `release-20261102.0`.
+    pub version: String,
+    /// The tarball for this architecture.
+    pub download: Download,
+    /// The `RuntimeClass` workloads name.
+    pub runtime_class: Value,
+}
+
+/// The gVisor plan for `arch`, when `host.gvisor` is on.
+///
+/// # Errors
+///
+/// When the architecture has no gVisor release.
+pub(crate) fn gvisor_plan(enabled: bool, arch: &str) -> Result<Option<GvisorPlan>, PlanError> {
+    if !enabled {
+        return Ok(None);
+    }
+    let download = GVISOR.tarball(arch).ok_or_else(|| {
+        PlanError::Config(format!(
+            "host.gvisor: gVisor has no release for {arch}; it supports amd64 and arm64"
+        ))
+    })?;
+    Ok(Some(GvisorPlan {
+        version: GVISOR.version.to_owned(),
+        download: download.into(),
+        runtime_class: gvisor_runtime_class(),
+    }))
+}
+
+/// A warning when the record has gVisor but the plan no longer does.
+fn gvisor_removed(facts: &Facts, gvisor: Option<&GvisorPlan>) -> Option<Warning> {
+    (gvisor.is_none() && facts.record.as_ref().is_some_and(|r| r.gvisor)).then(|| {
+        warning(
+            "gvisor.removed",
+            &[],
+            "gVisor is no longer enabled: apply removes its containerd configuration and \
+             RuntimeClass, and restarts the cluster."
+                .to_owned(),
+        )
+    })
+}
+
+/// The `RuntimeClass` that makes a Pod run on gVisor.
+fn gvisor_runtime_class() -> Value {
+    json!({
+        "apiVersion": "node.k8s.io/v1",
+        "kind": "RuntimeClass",
+        "metadata": {
+            "name": "gvisor",
+            "labels": {"app.kubernetes.io/managed-by": MANAGER},
+        },
+        "handler": "runsc",
+    })
 }
 
 /// One download.
@@ -621,6 +682,8 @@ pub fn plan_with(
     ));
 
     let cluster = cluster_plan(distribution, config.version(), &facts.arch, &mut warnings)?;
+    let gvisor = gvisor_plan(config.host.gvisor, &facts.arch)?;
+    warnings.extend(gvisor_removed(facts, gvisor.as_ref()));
     let kubernetes = distribution.kubernetes();
     if !index
         .kubernetes
@@ -689,6 +752,7 @@ pub fn plan_with(
         facts: facts.clone(),
         node_name,
         cluster,
+        gvisor,
         calico: (distribution == Distribution::K3s).then(|| CALICO.manifest().into()),
         host_file_paths: host_files.iter().map(|f| f.path.clone()).collect(),
         host_files,
@@ -1414,6 +1478,7 @@ fn server_files(
         tls_san: config.host.tls_san.clone(),
         disable: packaged_to_disable(distribution, chosen),
         identity: config.zeabur,
+        gvisor: config.host.gvisor,
     });
     files.push(distribution.node_name_file(node_name));
     files.extend(distribution.node_ip_file(&facts.node_ips));
@@ -3269,5 +3334,24 @@ mod tests {
             let stacked = plan(&index, &config(extra), &restricted).unwrap();
             assert!(stacked.host_files.contains(&cluster::apparmor_profile()));
         }
+    }
+
+    #[test]
+    fn gvisor_plan_pins_the_tarball_for_the_arch_and_the_runtime_class() {
+        let amd64 = gvisor_plan(true, "amd64").unwrap().unwrap();
+        assert_eq!(amd64.version, GVISOR.version);
+        assert_eq!(amd64.download.file, "gvisor-x86_64.tar.bz2");
+        assert_eq!(
+            amd64.download.sha256.as_deref(),
+            Some("6f6b1a8f0f4665a403238135167d0d990bfaeaff5544abf68f5e0d822b35484a")
+        );
+        assert_eq!(amd64.runtime_class["metadata"]["name"], "gvisor");
+        assert_eq!(amd64.runtime_class["handler"], "runsc");
+        assert_eq!(
+            gvisor_plan(true, "arm64").unwrap().unwrap().download.file,
+            "gvisor-aarch64.tar.bz2"
+        );
+        assert!(gvisor_plan(true, "riscv64").is_err());
+        assert!(gvisor_plan(false, "amd64").unwrap().is_none());
     }
 }

@@ -27,6 +27,12 @@ pub(crate) fn plan(plan: &Plan) -> String {
     );
     node_name(&mut s, &plan.node_name);
     node_addresses(&mut s, &plan.facts.node_ips);
+    if let Some(gvisor) = &plan.gvisor {
+        push(
+            &mut s,
+            &format!("gVisor           {} (RuntimeClass gvisor)", gvisor.version),
+        );
+    }
     push(&mut s, "");
     s.push_str(&changes(
         plan.changes.as_ref(),
@@ -353,6 +359,12 @@ pub(crate) fn join_plan(plan: &JoinPlan) -> String {
              already in the cluster."
         ),
     );
+    if let Some(gvisor) = &plan.gvisor {
+        push(
+            &mut s,
+            &format!("gVisor           {} (RuntimeClass gvisor)", gvisor.version),
+        );
+    }
     node_name(&mut s, &plan.node_name);
     node_addresses(&mut s, &plan.facts.node_ips);
     push(&mut s, "");

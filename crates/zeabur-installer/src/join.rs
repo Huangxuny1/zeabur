@@ -138,6 +138,7 @@ pub(crate) fn apply(config: &JoinConfig) -> Result<(), InstallError> {
         plan.node_prep.as_ref(),
     )?;
     let prepared = apply::prepare_node(plan.node_prep.as_ref())?;
+    apply::install_gvisor(plan.gvisor.as_ref())?;
 
     let distribution = plan.cluster.distribution;
     let layout = distribution.layout();
@@ -286,6 +287,10 @@ pub(crate) fn doctor(config: &JoinConfig) -> ExitCode {
                 .filter(|c| c.status != Status::Pass)
                 .map(|c| (c.status, c.detail)),
         );
+    }
+
+    if config.host.gvisor {
+        results.push(crate::doctor::gvisor_local(distribution));
     }
 
     if config.join.role == Role::Server {

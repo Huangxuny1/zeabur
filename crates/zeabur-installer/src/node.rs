@@ -104,6 +104,9 @@ pub(crate) fn add(config_path: &Path, options: &AddOptions) -> Result<(), Instal
     let longhorn = kubectl
         .get("customresourcedefinition", LONGHORN_CRD, None)?
         .is_some();
+    let gvisor = kubectl
+        .get("runtimeclass", "gvisor", None)?
+        .is_some_and(|class| class.get("handler").and_then(Value::as_str) == Some("runsc"));
     let registry = registry_mirror(&kubectl, layout.registry_ca_file)?;
     let node_names: Vec<String> = kubectl
         .run(
@@ -125,6 +128,7 @@ pub(crate) fn add(config_path: &Path, options: &AddOptions) -> Result<(), Instal
         expiry: expiry.as_ref().map(|(e, id)| (e.as_str(), id.as_str())),
         single_node,
         longhorn,
+        gvisor,
         registry: registry.as_ref(),
         node_names: &node_names,
     });
@@ -145,6 +149,8 @@ pub(crate) struct Instructions<'a> {
     pub(crate) single_node: Option<String>,
     /// The cluster runs Longhorn, so the new node needs preparing for it.
     pub(crate) longhorn: bool,
+    /// The cluster runs gVisor, so the new node gets its runtime too.
+    pub(crate) gvisor: bool,
     /// The in-cluster registry's mirror, when the cluster runs one.
     pub(crate) registry: Option<&'a Mirror>,
     /// The cluster's nodes, whose names the new node does not take.
@@ -196,6 +202,7 @@ pub(crate) fn instructions(i: &Instructions<'_>) -> String {
         i.role,
         i.token,
         i.longhorn,
+        i.gvisor,
         i.registry,
         i.node_names,
     ));
@@ -256,12 +263,17 @@ fn push(text: &mut String, line: &str) {
 }
 
 /// The shell commands that write the join configuration and run the installer.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the arguments are the fields of the join configuration"
+)]
 pub(crate) fn commands(
     distribution: Distribution,
     server: &str,
     role: Role,
     token: &str,
     longhorn: bool,
+    gvisor: bool,
     registry: Option<&Mirror>,
     node_names: &[String],
 ) -> String {
@@ -315,6 +327,9 @@ pub(crate) fn commands(
         ] {
             yaml.push_str(part);
         }
+    }
+    if gvisor {
+        yaml.push_str("host:\n  gvisor: true\n");
     }
     format!(
         "install -d -m 0700 /etc/zeabur-installer\n\
@@ -501,6 +516,7 @@ mod tests {
             expiry: Some(("2026-10-23T09:00:00Z", "abcdef")),
             single_node: Some("/etc/zeabur-installer/config.yaml".to_owned()),
             longhorn: false,
+            gvisor: false,
             registry: None,
             node_names: &["vps-1".to_owned()],
         });
@@ -517,6 +533,7 @@ mod tests {
             expiry: None,
             single_node: None,
             longhorn: false,
+            gvisor: false,
             registry: None,
             node_names: &["vps-1".to_owned()],
         });
@@ -530,6 +547,7 @@ mod tests {
             "https://10.0.0.5:9345",
             Role::Worker,
             "K10aa::abcdef.0123456789abcdef",
+            false,
             false,
             None,
             &["vps-1".to_owned(), "vps-2".to_owned()],
@@ -557,6 +575,7 @@ mod tests {
             Role::Worker,
             "K10aa::abcdef.0123456789abcdef",
             false,
+            false,
             Some(&Mirror {
                 host: "zot.zot.svc:5000".to_owned(),
                 cluster_ip: "10.43.0.50".to_owned(),
@@ -582,6 +601,66 @@ mod tests {
     }
 
     #[test]
+    fn a_cluster_with_gvisor_gives_the_new_node_the_runtime() {
+        let text = commands(
+            Distribution::Rke2,
+            "https://10.0.0.5:9345",
+            Role::Worker,
+            "K10aa::abcdef.0123456789abcdef",
+            false,
+            true,
+            None,
+            &[],
+        );
+        let yaml = text
+            .split_once("<<'EOF'\n")
+            .and_then(|(_, rest)| rest.split_once("EOF\n"))
+            .map(|(yaml, _)| yaml)
+            .unwrap();
+        let hash = "a".repeat(64);
+        let Document::Join(config) =
+            Document::parse(&yaml.replace("K10aa", &format!("K10{hash}"))).unwrap()
+        else {
+            panic!("not a join: {yaml}");
+        };
+        assert!(config.host.gvisor);
+    }
+
+    #[test]
+    fn gvisor_and_the_registry_stay_under_their_own_keys() {
+        let ca = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+        let text = commands(
+            Distribution::Rke2,
+            "https://10.0.0.5:9345",
+            Role::Server,
+            "K10aa::server:s3cret",
+            true,
+            true,
+            Some(&Mirror {
+                host: "zot.zot.svc:5000".to_owned(),
+                cluster_ip: "10.43.0.50".to_owned(),
+                ca: ca.to_owned(),
+            }),
+            &["vps-1".to_owned()],
+        );
+        let yaml = text
+            .split_once("<<'EOF'\n")
+            .and_then(|(_, rest)| rest.split_once("EOF\n"))
+            .map(|(yaml, _)| yaml)
+            .unwrap();
+        let hash = "a".repeat(64);
+        let Document::Join(config) =
+            Document::parse(&yaml.replace("K10aa", &format!("K10{hash}"))).unwrap()
+        else {
+            panic!("not a join: {yaml}");
+        };
+        assert!(config.host.gvisor);
+        assert!(config.join.longhorn);
+        assert!(config.join.registry.is_some());
+        assert!(config.join.server_config.is_some());
+    }
+
+    #[test]
     fn a_cluster_with_longhorn_prepares_the_new_node() {
         let text = instructions(&Instructions {
             distribution: Distribution::K3s,
@@ -591,6 +670,7 @@ mod tests {
             expiry: Some(("2026-10-23T09:00:00Z", "abcdef")),
             single_node: None,
             longhorn: true,
+            gvisor: false,
             registry: None,
             node_names: &[],
         });

@@ -41,6 +41,9 @@ pub fn host_files(options: &Options) -> Vec<HostFile> {
             content: config(options),
         },
     ];
+    if options.gvisor {
+        files.push(RKE2.containerd_gvisor_file());
+    }
     if options.identity {
         files.push(HostFile {
             path: format!("{dir}/config.yaml.d/50-zeabur-identity.yaml"),
@@ -64,15 +67,19 @@ pub fn host_files(options: &Options) -> Vec<HostFile> {
 /// The files of a worker: the kernel parameters and an agent `config.yaml` with the server's
 /// kubelet settings. The agent takes no server keys, so this is not the server's file.
 #[must_use]
-pub fn agent_files() -> Vec<HostFile> {
-    vec![
+pub fn agent_files(gvisor: bool) -> Vec<HostFile> {
+    let mut files = vec![
         RKE2.sysctl(),
         HostFile {
             path: format!("{}/config.yaml", RKE2.layout().config_dir),
             mode: 0o600,
             content: format!("{HEADER}profile: cis\n{}", RKE2.kubelet_args(false)),
         },
-    ]
+    ];
+    if gvisor {
+        files.push(RKE2.containerd_gvisor_file());
+    }
+    files
 }
 
 fn config(options: &Options) -> String {
@@ -115,6 +122,7 @@ mod tests {
             tls_san: vec![],
             disable: vec!["rke2-metrics-server".to_owned()],
             identity: true,
+            gvisor: false,
         });
         let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(
@@ -145,9 +153,10 @@ mod tests {
             tls_san: vec![],
             disable: vec![],
             identity: false,
+            gvisor: false,
         };
         let server = host_files(&options);
-        for content in [&server[2].content, &agent_files()[1].content] {
+        for content in [&server[2].content, &agent_files(false)[1].content] {
             let parsed: serde_json::Value = serde_saphyr::from_str(content).unwrap();
             let args: Vec<&str> = parsed["kubelet-arg"]
                 .as_array()
@@ -177,6 +186,7 @@ mod tests {
             tls_san: vec!["k8s.example.com".to_owned()],
             disable: vec![],
             identity: false,
+            gvisor: false,
         };
         let files = host_files(&options);
         for file in files.iter().filter(|f| {
@@ -197,8 +207,9 @@ mod tests {
             tls_san: vec![],
             disable: vec![],
             identity: false,
+            gvisor: false,
         });
-        let agent = agent_files();
+        let agent = agent_files(false);
         assert_eq!(agent[0], server[0]);
         assert!(agent[1].content.contains("profile: cis\n"));
         assert!(agent[1].content.contains("pod-max-pids=4096"));
@@ -211,13 +222,15 @@ mod tests {
             tls_san: vec![],
             disable: vec![],
             identity: false,
+            gvisor: false,
         });
         let server: serde_json::Value = serde_saphyr::from_str(&server[2].content).unwrap();
         assert_eq!(
             server["control-plane-resource-requests"],
             serde_json::json!(["etcd-memory=256Mi", "kube-controller-manager-memory=128Mi"])
         );
-        let agent: serde_json::Value = serde_saphyr::from_str(&agent_files()[1].content).unwrap();
+        let agent: serde_json::Value =
+            serde_saphyr::from_str(&agent_files(false)[1].content).unwrap();
         let args = agent["kubelet-arg"].as_array().unwrap();
         assert!(args.contains(&serde_json::json!("system-reserved=memory=350Mi")));
         assert!(args.contains(&serde_json::json!(
@@ -229,5 +242,24 @@ mod tests {
                 .any(|a| a.as_str().unwrap().starts_with("kube-reserved="))
         );
         assert!(agent.get("control-plane-resource-requests").is_none());
+    }
+
+    #[test]
+    fn gvisor_adds_the_containerd_drop_in() {
+        let files = host_files(&Options {
+            tls_san: vec![],
+            disable: vec![],
+            identity: false,
+            gvisor: true,
+        });
+        let drop_in = RKE2.containerd_gvisor_file();
+        assert!(files.contains(&drop_in));
+        assert_eq!(
+            drop_in.path,
+            "/var/lib/rancher/rke2/agent/etc/containerd/config-v3.toml.d/99-gvisor.toml"
+        );
+        assert!(drop_in.content.contains("io.containerd.runsc.v1"));
+        assert!(agent_files(true).contains(&drop_in));
+        assert!(!agent_files(false).contains(&drop_in));
     }
 }

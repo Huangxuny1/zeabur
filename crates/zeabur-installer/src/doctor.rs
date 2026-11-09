@@ -1,6 +1,7 @@
 //! `doctor`: checks the install, with the exit codes of the Nagios plugin convention, as
 //! `zeaburctl doctor` uses them: 0 OK, 1 warning, 2 critical, 3 when the checks cannot run.
 
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -8,7 +9,7 @@ use serde_json::Value;
 use zeabur_installer_host::kubectl::Kubectl;
 use zeabur_installer_host::nodeprep::{self, Stage};
 use zeabur_installer_host::preflight::{self, Encryption, Status};
-use zeabur_installer_host::{facts, systemd};
+use zeabur_installer_host::{cmd, facts, systemd};
 use zeabur_installer_plan::catalog::Health;
 use zeabur_installer_plan::cluster::Distribution;
 use zeabur_installer_plan::plan::{IDENTITY_NAMESPACE, ZEABUR_NAMESPACE};
@@ -47,6 +48,74 @@ fn policies(kubectl: &Kubectl, distribution: Distribution) -> (Status, String) {
     }
 }
 
+/// Whether gVisor's binaries and containerd drop-in are on this node.
+pub(crate) fn gvisor_local(distribution: Distribution) -> (Status, String) {
+    let binary = Path::new("/usr/local/bin/runsc");
+    let shim = Path::new("/usr/local/bin/containerd-shim-runsc-v1");
+    if !binary.exists() || !shim.exists() {
+        return (
+            Status::Fail,
+            "gVisor's runsc or containerd-shim-runsc-v1 is missing: run zeabur-installer apply"
+                .to_owned(),
+        );
+    }
+    let file = distribution.containerd_gvisor_file();
+    if std::fs::read_to_string(&file.path).ok().as_deref() != Some(file.content.as_str()) {
+        return (
+            Status::Fail,
+            format!(
+                "{} is missing or differs: run zeabur-installer apply",
+                file.path
+            ),
+        );
+    }
+    (
+        Status::Pass,
+        "gVisor's binaries and containerd configuration are in place".to_owned(),
+    )
+}
+
+/// Whether gVisor is installed as the record says.
+fn gvisor(kubectl: &Kubectl, distribution: Distribution, plan: &Value) -> (Status, String) {
+    if plan.get("gvisor").is_none_or(Value::is_null) {
+        return (Status::Pass, "gVisor is not enabled".to_owned());
+    }
+    let local = gvisor_local(distribution);
+    if local.0 != Status::Pass {
+        return local;
+    }
+    let version = plan
+        .pointer("/gvisor/version")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let installed =
+        cmd::run(Path::new("/usr/local/bin/runsc"), &["--version"], None).unwrap_or_default();
+    if !installed.contains(version) {
+        return (
+            Status::Warn,
+            format!(
+                "gVisor is not {version} ({}): run zeabur-installer apply",
+                installed.lines().next().unwrap_or_default()
+            ),
+        );
+    }
+    match kubectl.get("runtimeclass", "gvisor", None) {
+        Ok(Some(object)) if object.get("handler").and_then(Value::as_str) == Some("runsc") => (
+            Status::Pass,
+            format!("gVisor {version} is installed and RuntimeClass gvisor uses runsc"),
+        ),
+        Ok(Some(_)) => (
+            Status::Fail,
+            "RuntimeClass gvisor does not use handler runsc".to_owned(),
+        ),
+        Ok(None) => (
+            Status::Fail,
+            "RuntimeClass gvisor is missing: run zeabur-installer apply".to_owned(),
+        ),
+        Err(e) => (Status::Warn, format!("reading RuntimeClass gvisor: {e}")),
+    }
+}
+
 pub(crate) fn run() -> ExitCode {
     if let Some(code) = cannot_run() {
         return code;
@@ -79,6 +148,7 @@ pub(crate) fn run() -> ExitCode {
                 .unwrap_or_default();
             results.extend(components(&kubectl, &plan));
             results.push(default_class(&kubectl, &plan));
+            results.push(gvisor(&kubectl, distribution, &plan));
             if plan.get("nodePrep").is_some_and(|p| !p.is_null()) {
                 results.extend(
                     nodeprep::check(&storage::LONGHORN_PREP, Stage::After)

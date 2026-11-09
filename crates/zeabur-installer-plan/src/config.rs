@@ -178,6 +178,13 @@ impl PersonalConfig {
                     .to_owned(),
             ));
         }
+        if self.host.gvisor {
+            return Err(PlanError::Config(
+                "host.gvisor applies to a team install on K3s or RKE2; a personal install runs \
+                 KubeSolo"
+                    .to_owned(),
+            ));
+        }
         self.host.check()
     }
 }
@@ -227,6 +234,10 @@ pub struct Host {
     /// from the host's address, then `node-<6 hex>`. Once installed, a node keeps its name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_name: Option<String>,
+    /// Install gVisor on every node and create the `gvisor` `RuntimeClass`. Workloads opt in with
+    /// `runtimeClassName: gvisor`. Team installs on the pinned K3s or RKE2 release only.
+    #[serde(default)]
+    pub gvisor: bool,
 }
 
 impl Host {
@@ -410,6 +421,15 @@ pub struct ServerConfig {
 }
 
 impl JoinConfig {
+    /// The release chosen instead of the pinned one, for the distribution.
+    #[must_use]
+    pub fn version(&self) -> Option<&str> {
+        match self.distribution {
+            Distribution::K3s => self.k3s_version.as_deref(),
+            Distribution::Rke2 => self.rke2_version.as_deref(),
+        }
+    }
+
     /// Parses and checks a join configuration.
     ///
     /// # Errors
@@ -434,6 +454,13 @@ impl JoinConfig {
             self.rke2_version.as_ref(),
             self.k3s_version.as_ref(),
         )?;
+        if self.host.gvisor && self.version().is_some() {
+            return Err(PlanError::Config(
+                "host.gvisor: only the pinned K3s or RKE2 release is supported; remove k3sVersion \
+                 or rke2Version"
+                    .to_owned(),
+            ));
+        }
         if join.role == Role::Server && !self.distribution.takes_servers() {
             return Err(PlanError::SecondServer);
         }
@@ -722,6 +749,13 @@ impl Config {
             self.rke2_version.as_ref(),
             self.k3s_version.as_ref(),
         )?;
+        if self.host.gvisor && self.version().is_some() {
+            return Err(PlanError::Config(
+                "host.gvisor: only the pinned K3s or RKE2 release is supported; remove k3sVersion \
+                 or rke2Version"
+                    .to_owned(),
+            ));
+        }
         if !matches!(self.profile.as_str(), "single-node" | "multi-node") {
             return Err(PlanError::Config(format!(
                 "profile `{}` is not single-node or multi-node",
@@ -996,5 +1030,24 @@ mod tests {
             check_token(&format!("K10{HASH}::server:x"), Role::Server).unwrap(),
             TokenKind::Server
         );
+    }
+
+    #[test]
+    fn gvisor_needs_the_pinned_release_and_a_team_install() {
+        assert!(
+            Config::parse(&format!("{MINIMAL}host: {{gvisor: true}}\n"))
+                .unwrap()
+                .host
+                .gvisor
+        );
+        let custom = format!(
+            "{MINIMAL}distribution: rke2\nhost: {{gvisor: true}}\nrke2Version: v1.37.1+rke2r1\n"
+        );
+        let err = Config::parse(&custom).unwrap_err();
+        assert!(err.to_string().contains("host.gvisor"), "{err}");
+        assert!(PersonalConfig::parse("use: personal\nhost: {gvisor: true}\n").is_err());
+        assert!(join("host: {gvisor: true}\n").is_ok());
+        let custom = "host: {gvisor: true}\nrke2Version: v1.37.1+rke2r1\n";
+        assert!(join(custom).is_err());
     }
 }

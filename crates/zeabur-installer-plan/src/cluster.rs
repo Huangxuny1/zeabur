@@ -41,6 +41,9 @@ pub struct Layout {
     pub kubectl: &'static str,
     /// Archives the distribution imports into containerd on every start.
     pub images_dir: &'static str,
+    /// The directory containerd reads its configuration from. K3s and RKE2 1.36 ship containerd
+    /// 2, which reads `config-v3.toml` and its `config-v3.toml.d` drop-ins.
+    pub containerd_dir: &'static str,
     /// The join token of a joining node, mode 0600.
     pub join_token_file: &'static str,
     /// A server's own token; it joins servers and workers.
@@ -73,6 +76,7 @@ const K3S_LAYOUT: Layout = Layout {
     admin_kubeconfig: "/etc/rancher/k3s/k3s.yaml",
     kubectl: "/var/lib/rancher/k3s/data/current/bin/kubectl",
     images_dir: "/var/lib/rancher/k3s/agent/images",
+    containerd_dir: "/var/lib/rancher/k3s/agent/etc/containerd",
     join_token_file: "/etc/rancher/k3s/zeabur-join-token",
     server_token_file: "/var/lib/rancher/k3s/server/token",
     kubelet_kubeconfig: "/var/lib/rancher/k3s/agent/kubelet.kubeconfig",
@@ -92,6 +96,7 @@ const RKE2_LAYOUT: Layout = Layout {
     admin_kubeconfig: "/etc/rancher/rke2/rke2.yaml",
     kubectl: "/var/lib/rancher/rke2/bin/kubectl",
     images_dir: "/var/lib/rancher/rke2/agent/images",
+    containerd_dir: "/var/lib/rancher/rke2/agent/etc/containerd",
     join_token_file: "/etc/rancher/rke2/zeabur-join-token",
     server_token_file: "/var/lib/rancher/rke2/server/token",
     kubelet_kubeconfig: "/var/lib/rancher/rke2/agent/kubelet.kubeconfig",
@@ -424,10 +429,24 @@ impl Distribution {
 
     /// The files of a worker.
     #[must_use]
-    pub fn agent_files(self) -> Vec<HostFile> {
+    pub fn agent_files(self, gvisor: bool) -> Vec<HostFile> {
         match self {
-            Self::K3s => crate::k3s::agent_files(),
-            Self::Rke2 => crate::rke2::agent_files(),
+            Self::K3s => crate::k3s::agent_files(gvisor),
+            Self::Rke2 => crate::rke2::agent_files(gvisor),
+        }
+    }
+
+    /// The containerd drop-in that makes gVisor's `runsc` a runtime. The pinned K3s and RKE2
+    /// releases ship containerd 2, which reads `config-v3.toml.d`.
+    #[must_use]
+    pub fn containerd_gvisor_file(self) -> HostFile {
+        HostFile {
+            path: format!(
+                "{}/config-v3.toml.d/99-gvisor.toml",
+                self.layout().containerd_dir
+            ),
+            mode: 0o600,
+            content: GVISOR_CONTAINERD.to_owned(),
         }
     }
 
@@ -552,6 +571,8 @@ pub struct Options {
     pub disable: Vec<String>,
     /// Zeabur Identity is installed, so kube-apiserver reads its issuer.
     pub identity: bool,
+    /// gVisor is installed, so containerd gets its runtime.
+    pub gvisor: bool,
 }
 
 /// The `ConfigMap` in `kube-system` holding the authentication configuration, for servers that
@@ -566,6 +587,12 @@ pub const REGISTRY_CLUSTER_IP: &str = "10.43.0.50";
 
 pub(crate) const HEADER: &str = "# Written by zeabur-installer; `zeabur-installer doctor` compares it.\n\
                       # Put your own settings in config.yaml.d/90-local.yaml instead of editing this file.\n";
+
+/// The containerd drop-in that registers gVisor's `runsc` runtime. containerd 2 names the CRI
+/// plugin `io.containerd.cri.v1.runtime`; containerd 1 named it `io.containerd.grpc.v1.cri`.
+pub const GVISOR_CONTAINERD: &str = "# Written by zeabur-installer; `zeabur-installer doctor` compares it.\n\
+     [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runsc]\n\
+     runtime_type = \"io.containerd.runsc.v1\"\n";
 
 /// Trusts no issuer yet. Zeabur Identity replaces it once it serves its discovery document, and
 /// kube-apiserver picks the new file up without a restart.

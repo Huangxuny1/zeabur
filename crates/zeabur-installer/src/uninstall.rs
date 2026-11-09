@@ -144,6 +144,9 @@ pub(crate) fn leftovers(config: &Path, token_file: Option<&str>) -> Vec<PathBuf>
         PathBuf::from(MODULES_FILE),
         PathBuf::from(MULTIPATH_FILE),
         PathBuf::from(APPARMOR_PROFILE),
+        PathBuf::from("/usr/local/bin/runsc"),
+        PathBuf::from("/usr/local/bin/containerd-shim-runsc-v1"),
+        PathBuf::from("/usr/local/bin/gvisor-bin"),
     ];
     paths.extend(token_file.map(PathBuf::from));
     paths.retain(|p| p.exists());

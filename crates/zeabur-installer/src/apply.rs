@@ -18,9 +18,9 @@ use zeabur_installer_plan::config::{AccessMode, Config};
 use zeabur_installer_plan::fit::{self, NodeMemory};
 use zeabur_installer_plan::k3s;
 use zeabur_installer_plan::plan::{
-    self, ClusterPlan, ComponentPlan, Download, IDENTITY_NAMESPACE, IdentityPlan, LOCAL_ISSUER,
-    MANAGER, NAMESPACE_MANAGER, NodeWaiting, Plan, RegistryPlan, ReleasePlan, SecretRefPlan,
-    SecretSource, Source, ZEABUR_NAMESPACE, ZeaburPlan,
+    self, ClusterPlan, ComponentPlan, Download, GvisorPlan, IDENTITY_NAMESPACE, IdentityPlan,
+    LOCAL_ISSUER, MANAGER, NAMESPACE_MANAGER, NodeWaiting, Plan, RegistryPlan, ReleasePlan,
+    SecretRefPlan, SecretSource, Source, ZEABUR_NAMESPACE, ZeaburPlan,
 };
 use zeabur_installer_plan::record::{INSTALLER_FILE, INSTALLER_VERSION, Record};
 use zeabur_installer_plan::rke2::{ETCD_USER, PREFIX};
@@ -34,6 +34,10 @@ use crate::{InstallError, doctor, load, out, remove, render};
 pub(crate) const STATE_DIR: &str = "/var/lib/rancher/zeabur-installer";
 /// The `ConfigMap` recording what was installed.
 pub(crate) const STATE_CONFIGMAP: &str = "zeabur-installer";
+/// The `RuntimeClass` gVisor workloads name.
+const GVISOR_RUNTIMECLASS: &str = "gvisor";
+/// The label the installer puts on what it creates.
+const MANAGED_BY: &str = "app.kubernetes.io/managed-by";
 const RELOADS_METRIC: &str = "apiserver_authentication_config_controller_automatic_reloads_total";
 
 pub(crate) fn run(config_path: &Path, no_telemetry: bool) -> Result<(), InstallError> {
@@ -61,6 +65,7 @@ fn install(config: &Config, reporter: &Reporter) -> Result<(), InstallError> {
     )?;
     reporter.at(Step::NodePrep);
     let prepared = prepare_node(plan.node_prep.as_ref())?;
+    let removed_gvisor = prepare_gvisor(&plan, distribution)?;
 
     let kubectl = Kubectl::admin(distribution);
     reporter.at(Step::Cluster);
@@ -70,9 +75,10 @@ fn install(config: &Config, reporter: &Reporter) -> Result<(), InstallError> {
         files: &plan.host_files,
         image_archives: &config.sources.image_archives,
         server: true,
-        changed: false,
+        changed: removed_gvisor,
     })?;
     kubectl.wait_ready(Duration::from_secs(600))?;
+    apply_gvisor_runtime_class(&kubectl, &plan)?;
     files::set_modes(Path::new(distribution.layout().tls_dir), ".crt", 0o600)?;
     let replanned = !running && read_record(&kubectl)?.is_some();
     if replanned {
@@ -463,6 +469,96 @@ fn install_release(cluster: &ClusterPlan, server: bool, unit: &str) -> Result<()
         }
     }
     systemd::daemon_reload()?;
+    Ok(())
+}
+
+/// Installs gVisor when the plan has it, and removes its drop-in when it does not.
+fn prepare_gvisor(plan: &Plan, distribution: Distribution) -> Result<bool, InstallError> {
+    if plan.gvisor.is_some() {
+        install_gvisor(plan.gvisor.as_ref())?;
+        return Ok(false);
+    }
+    remove_gvisor_file(distribution)
+}
+
+/// Installs gVisor's `runsc` and `containerd-shim-runsc-v1` before K3s or RKE2 starts.
+pub(crate) fn install_gvisor(gvisor: Option<&GvisorPlan>) -> Result<(), InstallError> {
+    let Some(gvisor) = gvisor else {
+        return Ok(());
+    };
+    out::step("gVisor");
+    let installed = cmd::run("/usr/local/bin/runsc", &["--version"], None).unwrap_or_default();
+    if installed.contains(&gvisor.version)
+        && Path::new("/usr/local/bin/containerd-shim-runsc-v1").exists()
+    {
+        out::err(&format!("    {} is installed", gvisor.version));
+        return Ok(());
+    }
+    let dir = PathBuf::from(STATE_DIR)
+        .join("downloads")
+        .join(&gvisor.version);
+    let archive = dir.join(&gvisor.download.file);
+    out::err(&format!("    {}", gvisor.download.url));
+    download::fetch(
+        &download::agent(),
+        &gvisor.download.url,
+        &archive,
+        gvisor.download.sha256.as_deref(),
+    )?;
+    archive::unpack_tar_bz2(&archive, Path::new("/usr/local/bin"))?;
+    let version = cmd::run("/usr/local/bin/runsc", &["--version"], None).unwrap_or_default();
+    out::err(&format!(
+        "    installed {}",
+        version.lines().next().unwrap_or("runsc").trim()
+    ));
+    Ok(())
+}
+
+/// Removes the containerd drop-in when gVisor is turned off; true when it removed one.
+fn remove_gvisor_file(distribution: Distribution) -> Result<bool, InstallError> {
+    let file = distribution.containerd_gvisor_file();
+    let Ok(content) = fs::read_to_string(&file.path) else {
+        return Ok(false);
+    };
+    if !content.starts_with("# Written by zeabur-installer") {
+        return Ok(false);
+    }
+    fs::remove_file(&file.path)
+        .map_err(|e| InstallError::Message(format!("{}: {e}", file.path)))?;
+    out::err(&format!("    removed {}", file.path));
+    Ok(true)
+}
+
+/// Creates the `RuntimeClass` when gVisor is on, and removes the installer's when it is off.
+fn apply_gvisor_runtime_class(kubectl: &Kubectl, plan: &Plan) -> Result<(), InstallError> {
+    if let Some(gvisor) = &plan.gvisor {
+        kubectl.apply_object(&gvisor.runtime_class)?;
+        out::err(&format!(
+            "    RuntimeClass {GVISOR_RUNTIMECLASS} (handler runsc)"
+        ));
+        return Ok(());
+    }
+    let Some(existing) = kubectl.get("runtimeclass", GVISOR_RUNTIMECLASS, None)? else {
+        return Ok(());
+    };
+    let managed = existing
+        .pointer("/metadata/labels")
+        .and_then(|labels| labels.get(MANAGED_BY))
+        .and_then(Value::as_str)
+        == Some(MANAGER);
+    if !managed {
+        return Ok(());
+    }
+    kubectl.run(
+        &[
+            "delete",
+            "runtimeclass",
+            GVISOR_RUNTIMECLASS,
+            "--ignore-not-found",
+        ],
+        None,
+    )?;
+    out::err(&format!("    removed RuntimeClass {GVISOR_RUNTIMECLASS}"));
     Ok(())
 }
 

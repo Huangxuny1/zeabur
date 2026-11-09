@@ -26,6 +26,26 @@ pub fn unpack_tar_gz(archive: &Path, dest: &Path) -> Result<(), HostError> {
     tar.unpack(dest).map_err(HostError::io(archive))
 }
 
+/// Unpacks a `.tar.bz2` into `dest` with the system `tar`, keeping modes.
+///
+/// gVisor publishes its release only as `.tar.bz2` and `.tar.zst`; the installer has no bzip2
+/// decoder of its own, and `tar -xjf` is the one on every supported host.
+///
+/// # Errors
+///
+/// When `tar` cannot be run or the archive cannot be read. A host without `bzip2` fails here with
+/// tar's message.
+pub fn unpack_tar_bz2(archive: &Path, dest: &Path) -> Result<(), HostError> {
+    let archive = archive.to_string_lossy();
+    let dest = dest.to_string_lossy();
+    crate::cmd::run(
+        "tar",
+        &["-xjf", archive.as_ref(), "-C", dest.as_ref()],
+        None,
+    )
+    .map(drop)
+}
+
 /// Packs a chart directory as `helm package` would lay it out: one top-level directory named after
 /// the chart. A `HelmChart`'s `chartContent` takes the result, base64-encoded.
 ///

@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use crate::cluster::{self, Distribution, HostFile};
 use crate::config::{JoinConfig, Role};
-use crate::plan::{ClusterPlan, Facts, Warning, cluster_plan, warning};
+use crate::plan::{ClusterPlan, Facts, GvisorPlan, Warning, cluster_plan, gvisor_plan, warning};
 use crate::storage::{self, NodePrep};
 use crate::{PlanError, node_name};
 
@@ -145,6 +145,8 @@ pub struct JoinPlan {
     pub unit: &'static str,
     /// The release; it must be the cluster's.
     pub cluster: ClusterPlan,
+    /// gVisor, when the cluster runs it and this node gets it too.
+    pub gvisor: Option<GvisorPlan>,
     /// Files written before the node starts. The token file is not among them.
     #[serde(skip)]
     pub host_files: Vec<HostFile>,
@@ -363,9 +365,13 @@ pub fn plan(config: &JoinConfig, facts: &JoinFacts) -> Result<JoinPlan, PlanErro
         Distribution::Rke2 => config.rke2_version.as_deref(),
     };
     let cluster = cluster_plan(distribution, version, &facts.facts.arch, &mut warnings)?;
+    let gvisor = gvisor_plan(config.host.gvisor, &facts.facts.arch)?;
 
     let (mut host_files, unit) = match join.role {
-        Role::Worker => (distribution.agent_files(), distribution.agent_unit()),
+        Role::Worker => (
+            distribution.agent_files(config.host.gvisor),
+            distribution.agent_unit(),
+        ),
         Role::Server if !distribution.takes_servers() => return Err(PlanError::SecondServer),
         Role::Server => {
             let server_config = join.server_config.clone().unwrap_or_default();
@@ -374,6 +380,7 @@ pub fn plan(config: &JoinConfig, facts: &JoinFacts) -> Result<JoinPlan, PlanErro
                     tls_san: config.host.tls_san.clone(),
                     disable: server_config.disable,
                     identity: server_config.identity,
+                    gvisor: config.host.gvisor,
                 }),
                 distribution.server_unit(),
             )
@@ -421,6 +428,7 @@ pub fn plan(config: &JoinConfig, facts: &JoinFacts) -> Result<JoinPlan, PlanErro
         server: join.server.clone(),
         unit,
         cluster,
+        gvisor,
         host_file_paths: host_files.iter().map(|f| f.path.clone()).collect(),
         host_files,
         node_prep: longhorn.then_some(storage::LONGHORN_PREP),
