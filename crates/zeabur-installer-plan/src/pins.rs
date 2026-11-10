@@ -159,19 +159,17 @@ pub static GVISOR: Gvisor = Gvisor {
 };
 
 impl Gvisor {
-    /// The tarball of an architecture (`amd64`, `arm64`).
+    /// The tarball of an architecture (`amd64`, `arm64`), from `mirror` or GitHub.
     #[must_use]
-    pub fn tarball(&self, arch: &str) -> Option<Asset> {
+    pub fn tarball(&self, arch: &str, mirror: Option<&str>) -> Option<Asset> {
         let (file, sha256) = match arch {
             "amd64" => ("gvisor-x86_64.tar.bz2", self.amd64.tarball),
             "arm64" => ("gvisor-aarch64.tar.bz2", self.arm64.tarball),
             _ => return None,
         };
+        let base = mirror.unwrap_or("https://github.com/google/gvisor/releases/download");
         Some(Asset {
-            url: format!(
-                "https://github.com/google/gvisor/releases/download/{}/{file}",
-                self.version
-            ),
+            url: format!("{base}/{}/{file}", self.version),
             file: file.to_owned(),
             sha256,
         })

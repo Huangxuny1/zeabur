@@ -30,12 +30,12 @@ pub trait Runtime: Sync {
     ///
     /// When the install is personal or names a release other than the pinned one.
     fn check(&self, install: Install<'_>) -> Result<(), PlanError>;
-    /// The download and the `RuntimeClass` for `arch`.
+    /// The download and the `RuntimeClass` for `arch`, from `mirror` or the default source.
     ///
     /// # Errors
     ///
-    /// When the runtime has no release for the architecture.
-    fn plan(&self, arch: &str) -> Result<RuntimePlan, PlanError>;
+    /// When the runtime has no release for the architecture, or the mirror is not a base URL.
+    fn plan(&self, arch: &str, mirror: Option<&str>) -> Result<RuntimePlan, PlanError>;
     /// The containerd drop-in that registers the runtime.
     fn containerd_file(&self, distribution: Distribution) -> HostFile;
 }
@@ -93,9 +93,31 @@ pub fn check(on: bool, install: Install<'_>) -> Result<(), PlanError> {
 ///
 /// # Errors
 ///
-/// When the runtime has no release for the architecture.
-pub fn plan(on: bool, arch: &str) -> Result<Option<RuntimePlan>, PlanError> {
-    enabled(on).map(|runtime| runtime.plan(arch)).transpose()
+/// When the runtime has no release for the architecture, or the mirror is not a base URL.
+pub fn plan(on: bool, arch: &str, mirror: Option<&str>) -> Result<Option<RuntimePlan>, PlanError> {
+    enabled(on)
+        .map(|runtime| runtime.plan(arch, mirror))
+        .transpose()
+}
+
+/// The base URL of a runtime's release mirror, without a trailing slash.
+fn mirror_base(mirror: Option<&str>) -> Result<Option<&str>, PlanError> {
+    let Some(mirror) = mirror else {
+        return Ok(None);
+    };
+    let base = mirror.trim_end_matches('/');
+    if base.is_empty()
+        || !(base.starts_with("https://") || base.starts_with("http://"))
+        || base
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '#' | '?' | '"' | '\''))
+    {
+        return Err(PlanError::Config(format!(
+            "sources.gvisorMirror `{mirror}` is not a base URL: write it with http:// or https://, \
+             and without a query or fragment"
+        )));
+    }
+    Ok(Some(base))
 }
 
 /// The runtime with `id`, when this installer knows it.
@@ -152,8 +174,9 @@ impl Runtime for crate::pins::Gvisor {
         }
     }
 
-    fn plan(&self, arch: &str) -> Result<RuntimePlan, PlanError> {
-        let download = self.tarball(arch).ok_or_else(|| {
+    fn plan(&self, arch: &str, mirror: Option<&str>) -> Result<RuntimePlan, PlanError> {
+        let mirror = mirror_base(mirror)?;
+        let download = self.tarball(arch, mirror).ok_or_else(|| {
             PlanError::Config(format!(
                 "host.{}: {} has no release for {arch}; it supports amd64 and arm64",
                 self.id(),

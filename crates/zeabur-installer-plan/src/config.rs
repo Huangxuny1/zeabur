@@ -261,6 +261,8 @@ pub struct Sources {
     pub proxy_image: Option<String>,
     /// Zeabur's chart: a directory or a packaged `.tgz`.
     pub zeabur_chart: Option<String>,
+    /// The base URL of a gVisor release mirror; the pinned GitHub release when unset.
+    pub gvisor_mirror: Option<String>,
 }
 
 /// A configuration file: a new cluster, or a node joining one.
@@ -322,6 +324,8 @@ pub struct JoinSources {
     /// Image archives (`docker save` output) the node imports on start.
     #[serde(default)]
     pub image_archives: Vec<String>,
+    /// The base URL of a gVisor release mirror; the pinned GitHub release when unset.
+    pub gvisor_mirror: Option<String>,
 }
 
 /// The `join` section. `Debug` leaves the token out.

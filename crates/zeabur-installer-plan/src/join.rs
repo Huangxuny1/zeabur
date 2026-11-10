@@ -366,7 +366,8 @@ pub fn plan(config: &JoinConfig, facts: &JoinFacts) -> Result<JoinPlan, PlanErro
         Distribution::Rke2 => config.rke2_version.as_deref(),
     };
     let cluster = cluster_plan(distribution, version, &facts.facts.arch, &mut warnings)?;
-    let runtime = runtime::plan(config.host.gvisor, &facts.facts.arch)?;
+    let mirror = config.sources.gvisor_mirror.as_deref();
+    let runtime = runtime::plan(config.host.gvisor, &facts.facts.arch, mirror)?;
 
     let (mut host_files, unit) = match join.role {
         Role::Worker => (

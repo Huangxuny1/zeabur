@@ -96,11 +96,17 @@ pub(crate) fn add(config_path: &Path, options: &AddOptions) -> Result<(), Instal
         }
     };
 
-    let single_node = match load::document(config_path) {
-        Ok(Document::Install(config)) if config.profile == "single-node" => {
+    let document = load::document(config_path).ok();
+    let single_node = match &document {
+        Some(Document::Install(config)) if config.profile == "single-node" => {
             Some(config_path.display().to_string())
         }
-        Ok(_) | Err(_) => None,
+        _ => None,
+    };
+    let gvisor_mirror = match &document {
+        Some(Document::Install(config)) => config.sources.gvisor_mirror.clone(),
+        Some(Document::Join(config)) => config.sources.gvisor_mirror.clone(),
+        Some(Document::Personal(_)) | None => None,
     };
     let longhorn = kubectl
         .get("customresourcedefinition", LONGHORN_CRD, None)?
@@ -132,6 +138,7 @@ pub(crate) fn add(config_path: &Path, options: &AddOptions) -> Result<(), Instal
         single_node,
         longhorn,
         gvisor,
+        gvisor_mirror,
         registry: registry.as_ref(),
         node_names: &node_names,
     });
@@ -154,6 +161,8 @@ pub(crate) struct Instructions<'a> {
     pub(crate) longhorn: bool,
     /// The cluster runs gVisor, so the new node gets its runtime too.
     pub(crate) gvisor: bool,
+    /// The gVisor mirror from this server's configuration.
+    pub(crate) gvisor_mirror: Option<String>,
     /// The in-cluster registry's mirror, when the cluster runs one.
     pub(crate) registry: Option<&'a Mirror>,
     /// The cluster's nodes, whose names the new node does not take.
@@ -206,6 +215,7 @@ pub(crate) fn instructions(i: &Instructions<'_>) -> String {
         i.token,
         i.longhorn,
         i.gvisor,
+        i.gvisor_mirror.as_deref(),
         i.registry,
         i.node_names,
     ));
@@ -277,6 +287,7 @@ pub(crate) fn commands(
     token: &str,
     longhorn: bool,
     gvisor: bool,
+    gvisor_mirror: Option<&str>,
     registry: Option<&Mirror>,
     node_names: &[String],
 ) -> String {
@@ -335,6 +346,11 @@ pub(crate) fn commands(
         yaml.push_str("host:\n  ");
         yaml.push_str(runtime::GVISOR.id());
         yaml.push_str(": true\n");
+        if let Some(mirror) = gvisor_mirror {
+            yaml.push_str("sources:\n  gvisorMirror: ");
+            yaml.push_str(mirror);
+            yaml.push('\n');
+        }
     }
     format!(
         "install -d -m 0700 /etc/zeabur-installer\n\
@@ -522,6 +538,7 @@ mod tests {
             single_node: Some("/etc/zeabur-installer/config.yaml".to_owned()),
             longhorn: false,
             gvisor: false,
+            gvisor_mirror: None,
             registry: None,
             node_names: &["vps-1".to_owned()],
         });
@@ -539,6 +556,7 @@ mod tests {
             single_node: None,
             longhorn: false,
             gvisor: false,
+            gvisor_mirror: None,
             registry: None,
             node_names: &["vps-1".to_owned()],
         });
@@ -554,6 +572,7 @@ mod tests {
             "K10aa::abcdef.0123456789abcdef",
             false,
             false,
+            None,
             None,
             &["vps-1".to_owned(), "vps-2".to_owned()],
         );
@@ -581,6 +600,7 @@ mod tests {
             "K10aa::abcdef.0123456789abcdef",
             false,
             false,
+            None,
             Some(&Mirror {
                 host: "zot.zot.svc:5000".to_owned(),
                 cluster_ip: "10.43.0.50".to_owned(),
@@ -614,6 +634,7 @@ mod tests {
             "K10aa::abcdef.0123456789abcdef",
             false,
             true,
+            Some("https://mirror.example.com/gvisor"),
             None,
             &[],
         );
@@ -629,6 +650,10 @@ mod tests {
             panic!("not a join: {yaml}");
         };
         assert!(config.host.gvisor);
+        assert_eq!(
+            config.sources.gvisor_mirror.as_deref(),
+            Some("https://mirror.example.com/gvisor")
+        );
     }
 
     #[test]
@@ -641,6 +666,7 @@ mod tests {
             "K10aa::server:s3cret",
             true,
             true,
+            None,
             Some(&Mirror {
                 host: "zot.zot.svc:5000".to_owned(),
                 cluster_ip: "10.43.0.50".to_owned(),
@@ -676,6 +702,7 @@ mod tests {
             single_node: None,
             longhorn: true,
             gvisor: false,
+            gvisor_mirror: None,
             registry: None,
             node_names: &[],
         });

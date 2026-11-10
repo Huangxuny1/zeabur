@@ -640,7 +640,8 @@ pub fn plan_with(
     ));
 
     let cluster = cluster_plan(distribution, config.version(), &facts.arch, &mut warnings)?;
-    let runtime = runtime::plan(config.host.gvisor, &facts.arch)?;
+    let mirror = config.sources.gvisor_mirror.as_deref();
+    let runtime = runtime::plan(config.host.gvisor, &facts.arch, mirror)?;
     warnings.extend(runtime_removed(facts, runtime.as_ref()));
     let kubernetes = distribution.kubernetes();
     if !index
@@ -3298,7 +3299,7 @@ mod tests {
     fn the_runtime_plan_pins_the_tarball_for_the_arch_and_the_runtime_class() {
         use crate::runtime::Runtime as _;
 
-        let amd64 = runtime::GVISOR.plan("amd64").unwrap();
+        let amd64 = runtime::GVISOR.plan("amd64", None).unwrap();
         assert_eq!(amd64.version, runtime::GVISOR.version());
         assert_eq!(amd64.download.file, "gvisor-x86_64.tar.bz2");
         assert_eq!(
@@ -3308,10 +3309,23 @@ mod tests {
         assert_eq!(amd64.runtime_class["metadata"]["name"], "gvisor");
         assert_eq!(amd64.runtime_class["handler"], "runsc");
         assert_eq!(
-            runtime::GVISOR.plan("arm64").unwrap().download.file,
+            runtime::GVISOR.plan("arm64", None).unwrap().download.file,
             "gvisor-aarch64.tar.bz2"
         );
-        assert!(runtime::GVISOR.plan("riscv64").is_err());
+        assert!(runtime::GVISOR.plan("riscv64", None).is_err());
         assert!(runtime::enabled(false).is_none());
+
+        let mirror = runtime::GVISOR
+            .plan("amd64", Some("https://mirror.example.com/gvisor/"))
+            .unwrap();
+        assert_eq!(
+            mirror.download.url,
+            "https://mirror.example.com/gvisor/release-20261102.0/gvisor-x86_64.tar.bz2"
+        );
+        assert!(
+            runtime::GVISOR
+                .plan("amd64", Some("mirror.example.com"))
+                .is_err()
+        );
     }
 }

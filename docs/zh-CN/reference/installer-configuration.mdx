@@ -137,11 +137,13 @@ installer 一定会创建 `local-path`，数据存放在节点的 `/var/lib/zeab
 | `host.tlsSan` | `[]`。Kubernetes API server 证书中额外添加的 DNS 名称或 IP 地址，仅用于 server |
 | `host.requireEncryptedDisk` | `false`。设为 `true` 时，如果根目录或数据目录不在加密设备上，`apply` 就会停止 |
 | `host.nodeName` | 主机名转为小写。主机名不能用作节点名称，或由 IP 地址组成（例如 `ip-10-0-0-5`）时，改用 `node-3f9a2c` 这类名称。installer 会将这个名称写入 K3s 或 RKE2 的配置，以后主机名改了，节点名称也不会跟着改变。只能使用小写字母、数字、`-` 和 `.` |
-| `host.gvisor` | `false`。设为 `true` 时，在每个节点安装 gVisor，并创建 `gvisor` RuntimeClass。工作负载用 `runtimeClassName: gvisor` 选择它。仅支持 installer 固定版本的 K3s 或 RKE2，主机需要 `tar` 和 `bzip2` |
+| `host.gvisor` | `false`。设为 `true` 时，在每个节点安装 gVisor，并创建 `gvisor` RuntimeClass。工作负载用 `runtimeClassName: gvisor` 选择它。仅支持 installer 固定版本的 K3s 或 RKE2，主机需要 `tar` 和 `bzip2`。可设置 `sources.gvisorMirror` 从镜像站下载 |
 
 节点装好后会一直使用当初的名称。再次运行 `apply` 会沿用原来的名称；如果 `host.nodeName` 填了其他名称，`apply` 会停止，因为 Kubernetes 会把新名称当成同一地址上的第二个节点。
 
 gVisor 让工作负载使用自己的用户态内核，而不是宿主机的内核，从而缩小工作负载被攻破后能触及的范围。每个 Pod 会增加一些 CPU 和内存开销；如果工作负载需要设备或 gVisor 未实现的系统调用，就无法在它上面运行。`apply` 会在 K3s 或 RKE2 首次启动前安装固定版本的 gVisor；对已有集群会重启一次。`doctor` 会检查二进制文件、containerd drop-in 和 RuntimeClass。KubeSolo 的个人安装不接受 `host.gvisor`。
+
+gVisor 的发布文件放在 GitHub 上，中国大陆没有官方镜像站。可以把 `sources.gvisorMirror` 设成保留发布路径的镜像站或 GitHub 代理的基地址。installer 会接上版本和文件名，并且仍会使用固定的 SHA-256 校验下载的归档。
 
 ### `sources`
 
@@ -168,6 +170,7 @@ sources:
 | `zeaburImage` | Zeabur 镜像引用 |
 | `proxyImage` | Zeabur Proxy 镜像引用。可不写，不写就用 chart 自带的镜像 |
 | `zeaburChart` | Helm chart 目录或打包好的 `.tgz` |
+| `gvisorMirror` | gVisor 发布文件的镜像站基地址。installer 会接上 `/<版本>/<文件名>`。默认使用 GitHub 的发布页面 |
 
 从 `imageArchives` 中去掉的文件，下次 `apply` 时也会从 K3s 或 RKE2 的导入目录中移除。这份列表填写的是主机上已有的归档文件，与私有 registry 的访问配置无关。
 
@@ -200,7 +203,7 @@ host:
 
 ## 加入已有集群的文件
 
-顶层包含 `join` 时，installer 会将这台机器视为要加入集群的新节点，只安装 K3s 或 RKE2。同一份文件只能再添加 `distribution`、对应的版本字段（`k3sVersion` 或 `rke2Version`）、`host` 和 `sources.imageArchives`，不能添加 `profile`、`access` 等创建集群的字段。
+顶层包含 `join` 时，installer 会将这台机器视为要加入集群的新节点，只安装 K3s 或 RKE2。同一份文件只能再添加 `distribution`、对应的版本字段（`k3sVersion` 或 `rke2Version`）、`host`，以及 `sources.imageArchives` 或 `sources.gvisorMirror`，不能添加 `profile`、`access` 等创建集群的字段。
 
 在已有 server 上运行 `zeabur-installer node add`，获取完整 YAML，保存到新主机。文件已包含令牌和 server 配置，不需要自行拼装。
 
