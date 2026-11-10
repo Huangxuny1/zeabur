@@ -42,7 +42,7 @@ pub fn host_files(options: &Options) -> Vec<HostFile> {
         },
     ];
     if options.gvisor {
-        files.push(RKE2.containerd_gvisor_file());
+        files.push(RKE2.containerd_runtime_file());
     }
     if options.identity {
         files.push(HostFile {
@@ -77,7 +77,7 @@ pub fn agent_files(gvisor: bool) -> Vec<HostFile> {
         },
     ];
     if gvisor {
-        files.push(RKE2.containerd_gvisor_file());
+        files.push(RKE2.containerd_runtime_file());
     }
     files
 }
@@ -252,7 +252,7 @@ mod tests {
             identity: false,
             gvisor: true,
         });
-        let drop_in = RKE2.containerd_gvisor_file();
+        let drop_in = RKE2.containerd_runtime_file();
         assert!(files.contains(&drop_in));
         assert_eq!(
             drop_in.path,

@@ -58,7 +58,7 @@ pub fn host_files(options: &Options) -> Vec<HostFile> {
         },
     ];
     if options.gvisor {
-        files.push(K3S.containerd_gvisor_file());
+        files.push(K3S.containerd_runtime_file());
     }
     if options.identity {
         files.push(HostFile {
@@ -93,7 +93,7 @@ pub fn agent_files(gvisor: bool) -> Vec<HostFile> {
         },
     ];
     if gvisor {
-        files.push(K3S.containerd_gvisor_file());
+        files.push(K3S.containerd_runtime_file());
     }
     files
 }
@@ -440,7 +440,7 @@ mod tests {
 
     #[test]
     fn gvisor_adds_the_containerd_drop_in() {
-        let drop_in = K3S.containerd_gvisor_file();
+        let drop_in = K3S.containerd_runtime_file();
         assert_eq!(
             drop_in.path,
             "/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d/99-gvisor.toml"

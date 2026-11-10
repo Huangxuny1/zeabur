@@ -28,7 +28,7 @@ pub fn unpack_tar_gz(archive: &Path, dest: &Path) -> Result<(), HostError> {
 
 /// Unpacks a `.tar.bz2` into `dest` with the system `tar`, keeping modes.
 ///
-/// gVisor publishes its release only as `.tar.bz2` and `.tar.zst`; the installer has no bzip2
+/// gVisor publishes its release only as `.tar.bz2` and `.tar.zstd`; the installer has no bzip2
 /// decoder of its own, and `tar -xjf` is the one on every supported host.
 ///
 /// # Errors

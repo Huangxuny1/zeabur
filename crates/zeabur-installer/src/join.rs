@@ -12,7 +12,7 @@ use zeabur_installer_host::{facts, files, network, systemd};
 use zeabur_installer_plan::cluster::{AUTHN_CONFIGMAP, Distribution};
 use zeabur_installer_plan::config::{self, JoinConfig, Role};
 use zeabur_installer_plan::join::{self, JoinFacts, JoinPlan, Latency, RTT_SAMPLES};
-use zeabur_installer_plan::storage;
+use zeabur_installer_plan::{runtime, storage};
 
 use crate::apply::{self, ClusterInstall};
 use crate::{InstallError, load, node, out, render};
@@ -138,7 +138,7 @@ pub(crate) fn apply(config: &JoinConfig) -> Result<(), InstallError> {
         plan.node_prep.as_ref(),
     )?;
     let prepared = apply::prepare_node(plan.node_prep.as_ref())?;
-    apply::install_gvisor(plan.gvisor.as_ref())?;
+    apply::install_runtime(plan.runtime.as_ref())?;
 
     let distribution = plan.cluster.distribution;
     let layout = distribution.layout();
@@ -289,8 +289,12 @@ pub(crate) fn doctor(config: &JoinConfig) -> ExitCode {
         );
     }
 
-    if config.host.gvisor {
-        results.push(crate::doctor::gvisor_local(distribution));
+    if let Some(selected) = runtime::enabled(config.host.gvisor) {
+        results.push(crate::doctor::runtime_local(
+            distribution,
+            selected,
+            Some(selected.version()),
+        ));
     }
 
     if config.join.role == Role::Server {

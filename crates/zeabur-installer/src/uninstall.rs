@@ -9,6 +9,7 @@ use zeabur_installer_host::facts;
 use zeabur_installer_host::kubectl::Kubectl;
 use zeabur_installer_plan::cluster::{APPARMOR_PROFILE, Distribution, EMPTY_AUTHN};
 use zeabur_installer_plan::plan::{IDENTITY_NAMESPACE, ZEABUR_NAMESPACE};
+use zeabur_installer_plan::runtime::{self, Runtime as _};
 use zeabur_installer_plan::storage::{MODULES_FILE, MULTIPATH_FILE};
 
 use crate::apply::{self, STATE_DIR};
@@ -144,10 +145,8 @@ pub(crate) fn leftovers(config: &Path, token_file: Option<&str>) -> Vec<PathBuf>
         PathBuf::from(MODULES_FILE),
         PathBuf::from(MULTIPATH_FILE),
         PathBuf::from(APPARMOR_PROFILE),
-        PathBuf::from("/usr/local/bin/runsc"),
-        PathBuf::from("/usr/local/bin/containerd-shim-runsc-v1"),
-        PathBuf::from("/usr/local/bin/gvisor-bin"),
     ];
+    paths.extend(runtime::GVISOR.paths().iter().map(PathBuf::from));
     paths.extend(token_file.map(PathBuf::from));
     paths.retain(|p| p.exists());
     paths.dedup();

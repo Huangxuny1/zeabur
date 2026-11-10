@@ -10,8 +10,8 @@ use std::net::IpAddr;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::PlanError;
 use crate::cluster::Distribution;
+use crate::{PlanError, runtime};
 
 /// The whole configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -178,12 +178,8 @@ impl PersonalConfig {
                     .to_owned(),
             ));
         }
-        if self.host.gvisor {
-            return Err(PlanError::Config(
-                "host.gvisor applies to a team install on K3s or RKE2; a personal install runs \
-                 KubeSolo"
-                    .to_owned(),
-            ));
+        if let Some(selected) = runtime::enabled(self.host.gvisor) {
+            selected.check(runtime::Install::Personal)?;
         }
         self.host.check()
     }
@@ -454,12 +450,10 @@ impl JoinConfig {
             self.rke2_version.as_ref(),
             self.k3s_version.as_ref(),
         )?;
-        if self.host.gvisor && self.version().is_some() {
-            return Err(PlanError::Config(
-                "host.gvisor: only the pinned K3s or RKE2 release is supported; remove k3sVersion \
-                 or rke2Version"
-                    .to_owned(),
-            ));
+        if let Some(selected) = runtime::enabled(self.host.gvisor) {
+            selected.check(runtime::Install::Team {
+                version: self.version(),
+            })?;
         }
         if join.role == Role::Server && !self.distribution.takes_servers() {
             return Err(PlanError::SecondServer);
@@ -749,12 +743,10 @@ impl Config {
             self.rke2_version.as_ref(),
             self.k3s_version.as_ref(),
         )?;
-        if self.host.gvisor && self.version().is_some() {
-            return Err(PlanError::Config(
-                "host.gvisor: only the pinned K3s or RKE2 release is supported; remove k3sVersion \
-                 or rke2Version"
-                    .to_owned(),
-            ));
+        if let Some(selected) = runtime::enabled(self.host.gvisor) {
+            selected.check(runtime::Install::Team {
+                version: self.version(),
+            })?;
         }
         if !matches!(self.profile.as_str(), "single-node" | "multi-node") {
             return Err(PlanError::Config(format!(

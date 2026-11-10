@@ -148,7 +148,7 @@ pub struct GvisorFiles {
 }
 
 /// The gVisor release this installer installs.
-pub const GVISOR: Gvisor = Gvisor {
+pub static GVISOR: Gvisor = Gvisor {
     version: "release-20261102.0",
     amd64: GvisorFiles {
         tarball: "6f6b1a8f0f4665a403238135167d0d990bfaeaff5544abf68f5e0d822b35484a",

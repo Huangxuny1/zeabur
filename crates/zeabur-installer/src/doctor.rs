@@ -13,6 +13,7 @@ use zeabur_installer_host::{cmd, facts, systemd};
 use zeabur_installer_plan::catalog::Health;
 use zeabur_installer_plan::cluster::Distribution;
 use zeabur_installer_plan::plan::{IDENTITY_NAMESPACE, ZEABUR_NAMESPACE};
+use zeabur_installer_plan::runtime::{self, Runtime};
 use zeabur_installer_plan::storage;
 
 use crate::apply::STATE_CONFIGMAP;
@@ -48,18 +49,24 @@ fn policies(kubectl: &Kubectl, distribution: Distribution) -> (Status, String) {
     }
 }
 
-/// Whether gVisor's binaries and containerd drop-in are on this node.
-pub(crate) fn gvisor_local(distribution: Distribution) -> (Status, String) {
-    let binary = Path::new("/usr/local/bin/runsc");
-    let shim = Path::new("/usr/local/bin/containerd-shim-runsc-v1");
-    if !binary.exists() || !shim.exists() {
-        return (
-            Status::Fail,
-            "gVisor's runsc or containerd-shim-runsc-v1 is missing: run zeabur-installer apply"
-                .to_owned(),
-        );
+/// Whether the runtime's files and containerd drop-in are on this node.
+pub(crate) fn runtime_local(
+    distribution: Distribution,
+    runtime: &dyn Runtime,
+    version: Option<&str>,
+) -> (Status, String) {
+    for path in runtime.paths() {
+        if !Path::new(path).exists() {
+            return (
+                Status::Fail,
+                format!(
+                    "{} is missing {path}: run zeabur-installer apply",
+                    runtime.display_name()
+                ),
+            );
+        }
     }
-    let file = distribution.containerd_gvisor_file();
+    let file = runtime.containerd_file(distribution);
     if std::fs::read_to_string(&file.path).ok().as_deref() != Some(file.content.as_str()) {
         return (
             Status::Fail,
@@ -69,50 +76,81 @@ pub(crate) fn gvisor_local(distribution: Distribution) -> (Status, String) {
             ),
         );
     }
-    (
-        Status::Pass,
-        "gVisor's binaries and containerd configuration are in place".to_owned(),
-    )
-}
-
-/// Whether gVisor is installed as the record says.
-fn gvisor(kubectl: &Kubectl, distribution: Distribution, plan: &Value) -> (Status, String) {
-    if plan.get("gvisor").is_none_or(Value::is_null) {
-        return (Status::Pass, "gVisor is not enabled".to_owned());
-    }
-    let local = gvisor_local(distribution);
-    if local.0 != Status::Pass {
-        return local;
-    }
-    let version = plan
-        .pointer("/gvisor/version")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let installed =
-        cmd::run(Path::new("/usr/local/bin/runsc"), &["--version"], None).unwrap_or_default();
+    let Some(version) = version else {
+        return (
+            Status::Pass,
+            format!("{} is installed", runtime.display_name()),
+        );
+    };
+    let installed = cmd::run(runtime.binary(), &["--version"], None).unwrap_or_default();
     if !installed.contains(version) {
         return (
             Status::Warn,
             format!(
-                "gVisor is not {version} ({}): run zeabur-installer apply",
+                "{} is not {version} ({}): run zeabur-installer apply",
+                runtime.display_name(),
                 installed.lines().next().unwrap_or_default()
             ),
         );
     }
-    match kubectl.get("runtimeclass", "gvisor", None) {
-        Ok(Some(object)) if object.get("handler").and_then(Value::as_str) == Some("runsc") => (
-            Status::Pass,
-            format!("gVisor {version} is installed and RuntimeClass gvisor uses runsc"),
-        ),
+    (
+        Status::Pass,
+        format!("{} {version} is installed", runtime.display_name()),
+    )
+}
+
+/// Whether the recorded runtime is installed.
+fn runtime_check(kubectl: &Kubectl, distribution: Distribution, plan: &Value) -> (Status, String) {
+    let Some(id) = plan.pointer("/runtime/id").and_then(Value::as_str) else {
+        return (Status::Pass, "no alternative runtime is enabled".to_owned());
+    };
+    let Some(runtime) = runtime::by_id(id) else {
+        return (
+            Status::Warn,
+            format!("the record names the runtime {id}, which this installer does not know"),
+        );
+    };
+    let version = plan
+        .pointer("/runtime/version")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| runtime.version());
+    let local = runtime_local(distribution, runtime, Some(version));
+    if local.0 != Status::Pass {
+        return local;
+    }
+    match kubectl.get("runtimeclass", runtime.id(), None) {
+        Ok(Some(object))
+            if object.get("handler").and_then(Value::as_str) == Some(runtime.handler()) =>
+        {
+            (
+                Status::Pass,
+                format!(
+                    "{} {version} is installed and RuntimeClass {} uses {}",
+                    runtime.display_name(),
+                    runtime.id(),
+                    runtime.handler()
+                ),
+            )
+        }
         Ok(Some(_)) => (
             Status::Fail,
-            "RuntimeClass gvisor does not use handler runsc".to_owned(),
+            format!(
+                "RuntimeClass {} does not use handler {}",
+                runtime.id(),
+                runtime.handler()
+            ),
         ),
         Ok(None) => (
             Status::Fail,
-            "RuntimeClass gvisor is missing: run zeabur-installer apply".to_owned(),
+            format!(
+                "RuntimeClass {} is missing: run zeabur-installer apply",
+                runtime.id()
+            ),
         ),
-        Err(e) => (Status::Warn, format!("reading RuntimeClass gvisor: {e}")),
+        Err(e) => (
+            Status::Warn,
+            format!("reading RuntimeClass {}: {e}", runtime.id()),
+        ),
     }
 }
 
@@ -148,7 +186,7 @@ pub(crate) fn run() -> ExitCode {
                 .unwrap_or_default();
             results.extend(components(&kubectl, &plan));
             results.push(default_class(&kubectl, &plan));
-            results.push(gvisor(&kubectl, distribution, &plan));
+            results.push(runtime_check(&kubectl, distribution, &plan));
             if plan.get("nodePrep").is_some_and(|p| !p.is_null()) {
                 results.extend(
                     nodeprep::check(&storage::LONGHORN_PREP, Stage::After)

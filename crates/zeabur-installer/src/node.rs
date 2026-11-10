@@ -15,6 +15,7 @@ use zeabur_installer_host::token::{self, BootstrapToken};
 use zeabur_installer_plan::cluster::Distribution;
 use zeabur_installer_plan::config::{Document, Role};
 use zeabur_installer_plan::plan::{self, MANAGER, RegistryPlan};
+use zeabur_installer_plan::runtime::{self, Runtime as _};
 use zeabur_installer_plan::{PlanError, join};
 
 use crate::apply::STATE_CONFIGMAP;
@@ -105,8 +106,10 @@ pub(crate) fn add(config_path: &Path, options: &AddOptions) -> Result<(), Instal
         .get("customresourcedefinition", LONGHORN_CRD, None)?
         .is_some();
     let gvisor = kubectl
-        .get("runtimeclass", "gvisor", None)?
-        .is_some_and(|class| class.get("handler").and_then(Value::as_str) == Some("runsc"));
+        .get("runtimeclass", runtime::GVISOR.id(), None)?
+        .is_some_and(|class| {
+            class.get("handler").and_then(Value::as_str) == Some(runtime::GVISOR.handler())
+        });
     let registry = registry_mirror(&kubectl, layout.registry_ca_file)?;
     let node_names: Vec<String> = kubectl
         .run(
@@ -329,7 +332,9 @@ pub(crate) fn commands(
         }
     }
     if gvisor {
-        yaml.push_str("host:\n  gvisor: true\n");
+        yaml.push_str("host:\n  ");
+        yaml.push_str(runtime::GVISOR.id());
+        yaml.push_str(": true\n");
     }
     format!(
         "install -d -m 0700 /etc/zeabur-installer\n\

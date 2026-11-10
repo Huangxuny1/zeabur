@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::pins::{K3S, RKE2};
+use crate::runtime::Runtime as _;
 
 /// A team install's Kubernetes distribution.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -436,18 +437,10 @@ impl Distribution {
         }
     }
 
-    /// The containerd drop-in that makes gVisor's `runsc` a runtime. The pinned K3s and RKE2
-    /// releases ship containerd 2, which reads `config-v3.toml.d`.
+    /// The containerd drop-in that registers the alternative runtime.
     #[must_use]
-    pub fn containerd_gvisor_file(self) -> HostFile {
-        HostFile {
-            path: format!(
-                "{}/config-v3.toml.d/99-gvisor.toml",
-                self.layout().containerd_dir
-            ),
-            mode: 0o600,
-            content: GVISOR_CONTAINERD.to_owned(),
-        }
+    pub fn containerd_runtime_file(self) -> HostFile {
+        crate::runtime::GVISOR.containerd_file(self)
     }
 
     /// The kernel parameters `protect-kernel-defaults` makes the kubelet check; it refuses to
@@ -571,7 +564,7 @@ pub struct Options {
     pub disable: Vec<String>,
     /// Zeabur Identity is installed, so kube-apiserver reads its issuer.
     pub identity: bool,
-    /// gVisor is installed, so containerd gets its runtime.
+    /// An alternative runtime is installed, so containerd gets it.
     pub gvisor: bool,
 }
 
@@ -587,12 +580,6 @@ pub const REGISTRY_CLUSTER_IP: &str = "10.43.0.50";
 
 pub(crate) const HEADER: &str = "# Written by zeabur-installer; `zeabur-installer doctor` compares it.\n\
                       # Put your own settings in config.yaml.d/90-local.yaml instead of editing this file.\n";
-
-/// The containerd drop-in that registers gVisor's `runsc` runtime. containerd 2 names the CRI
-/// plugin `io.containerd.cri.v1.runtime`; containerd 1 named it `io.containerd.grpc.v1.cri`.
-pub const GVISOR_CONTAINERD: &str = "# Written by zeabur-installer; `zeabur-installer doctor` compares it.\n\
-     [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runsc]\n\
-     runtime_type = \"io.containerd.runsc.v1\"\n";
 
 /// Trusts no issuer yet. Zeabur Identity replaces it once it serves its discovery document, and
 /// kube-apiserver picks the new file up without a restart.

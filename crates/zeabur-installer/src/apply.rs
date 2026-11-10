@@ -18,12 +18,13 @@ use zeabur_installer_plan::config::{AccessMode, Config};
 use zeabur_installer_plan::fit::{self, NodeMemory};
 use zeabur_installer_plan::k3s;
 use zeabur_installer_plan::plan::{
-    self, ClusterPlan, ComponentPlan, Download, GvisorPlan, IDENTITY_NAMESPACE, IdentityPlan,
-    LOCAL_ISSUER, MANAGER, NAMESPACE_MANAGER, NodeWaiting, Plan, RegistryPlan, ReleasePlan,
-    SecretRefPlan, SecretSource, Source, ZEABUR_NAMESPACE, ZeaburPlan,
+    self, ClusterPlan, ComponentPlan, Download, IDENTITY_NAMESPACE, IdentityPlan, LOCAL_ISSUER,
+    MANAGER, NAMESPACE_MANAGER, NodeWaiting, Plan, RegistryPlan, ReleasePlan, SecretRefPlan,
+    SecretSource, Source, ZEABUR_NAMESPACE, ZeaburPlan,
 };
 use zeabur_installer_plan::record::{INSTALLER_FILE, INSTALLER_VERSION, Record};
 use zeabur_installer_plan::rke2::{ETCD_USER, PREFIX};
+use zeabur_installer_plan::runtime::{self, RuntimePlan};
 use zeabur_installer_plan::storage::{self, NodePrep, Storage};
 use zeabur_telemetry::{InstallationId, Step};
 
@@ -34,8 +35,6 @@ use crate::{InstallError, doctor, load, out, remove, render};
 pub(crate) const STATE_DIR: &str = "/var/lib/rancher/zeabur-installer";
 /// The `ConfigMap` recording what was installed.
 pub(crate) const STATE_CONFIGMAP: &str = "zeabur-installer";
-/// The `RuntimeClass` gVisor workloads name.
-const GVISOR_RUNTIMECLASS: &str = "gvisor";
 /// The label the installer puts on what it creates.
 const MANAGED_BY: &str = "app.kubernetes.io/managed-by";
 const RELOADS_METRIC: &str = "apiserver_authentication_config_controller_automatic_reloads_total";
@@ -65,7 +64,7 @@ fn install(config: &Config, reporter: &Reporter) -> Result<(), InstallError> {
     )?;
     reporter.at(Step::NodePrep);
     let prepared = prepare_node(plan.node_prep.as_ref())?;
-    let removed_gvisor = prepare_gvisor(&plan, distribution)?;
+    let removed_runtime = prepare_runtime(&plan, distribution)?;
 
     let kubectl = Kubectl::admin(distribution);
     reporter.at(Step::Cluster);
@@ -75,10 +74,10 @@ fn install(config: &Config, reporter: &Reporter) -> Result<(), InstallError> {
         files: &plan.host_files,
         image_archives: &config.sources.image_archives,
         server: true,
-        changed: removed_gvisor,
+        changed: removed_runtime,
     })?;
     kubectl.wait_ready(Duration::from_secs(600))?;
-    apply_gvisor_runtime_class(&kubectl, &plan)?;
+    apply_runtime_class(&kubectl, &plan)?;
     files::set_modes(Path::new(distribution.layout().tls_dir), ".crt", 0o600)?;
     let replanned = !running && read_record(&kubectl)?.is_some();
     if replanned {
@@ -472,51 +471,64 @@ fn install_release(cluster: &ClusterPlan, server: bool, unit: &str) -> Result<()
     Ok(())
 }
 
-/// Installs gVisor when the plan has it, and removes its drop-in when it does not.
-fn prepare_gvisor(plan: &Plan, distribution: Distribution) -> Result<bool, InstallError> {
-    if plan.gvisor.is_some() {
-        install_gvisor(plan.gvisor.as_ref())?;
+/// Installs the planned runtime, and removes the recorded one's drop-in when the plan has none.
+fn prepare_runtime(plan: &Plan, distribution: Distribution) -> Result<bool, InstallError> {
+    if plan.runtime.is_some() {
+        install_runtime(plan.runtime.as_ref())?;
         return Ok(false);
     }
-    remove_gvisor_file(distribution)
+    remove_runtime_file(plan, distribution)
 }
 
-/// Installs gVisor's `runsc` and `containerd-shim-runsc-v1` before K3s or RKE2 starts.
-pub(crate) fn install_gvisor(gvisor: Option<&GvisorPlan>) -> Result<(), InstallError> {
-    let Some(gvisor) = gvisor else {
+/// Installs the runtime's binaries before K3s or RKE2 starts.
+pub(crate) fn install_runtime(runtime: Option<&RuntimePlan>) -> Result<(), InstallError> {
+    let Some(runtime) = runtime else {
         return Ok(());
     };
-    out::step("gVisor");
-    let installed = cmd::run("/usr/local/bin/runsc", &["--version"], None).unwrap_or_default();
-    if installed.contains(&gvisor.version)
-        && Path::new("/usr/local/bin/containerd-shim-runsc-v1").exists()
+    out::step(&runtime.display_name);
+    let installed = cmd::run(&runtime.binary, &["--version"], None).unwrap_or_default();
+    if installed.contains(&runtime.version)
+        && runtime.paths.iter().all(|path| Path::new(path).exists())
     {
-        out::err(&format!("    {} is installed", gvisor.version));
+        out::err(&format!("    {} is installed", runtime.version));
         return Ok(());
     }
     let dir = PathBuf::from(STATE_DIR)
         .join("downloads")
-        .join(&gvisor.version);
-    let archive = dir.join(&gvisor.download.file);
-    out::err(&format!("    {}", gvisor.download.url));
+        .join(&runtime.version);
+    let archive = dir.join(&runtime.download.file);
+    out::err(&format!("    {}", runtime.download.url));
     download::fetch(
         &download::agent(),
-        &gvisor.download.url,
+        &runtime.download.url,
         &archive,
-        gvisor.download.sha256.as_deref(),
+        runtime.download.sha256.as_deref(),
     )?;
-    archive::unpack_tar_bz2(&archive, Path::new("/usr/local/bin"))?;
-    let version = cmd::run("/usr/local/bin/runsc", &["--version"], None).unwrap_or_default();
+    archive::unpack_tar_bz2(&archive, Path::new(&runtime.install_dir))?;
+    let version = cmd::run(&runtime.binary, &["--version"], None).unwrap_or_default();
     out::err(&format!(
         "    installed {}",
-        version.lines().next().unwrap_or("runsc").trim()
+        version
+            .lines()
+            .next()
+            .unwrap_or(runtime.version.as_str())
+            .trim()
     ));
     Ok(())
 }
 
-/// Removes the containerd drop-in when gVisor is turned off; true when it removed one.
-fn remove_gvisor_file(distribution: Distribution) -> Result<bool, InstallError> {
-    let file = distribution.containerd_gvisor_file();
+/// Removes the recorded runtime's containerd drop-in; true when it removed one.
+fn remove_runtime_file(plan: &Plan, distribution: Distribution) -> Result<bool, InstallError> {
+    let Some(previous) = plan
+        .facts
+        .record
+        .as_ref()
+        .and_then(|record| record.runtime.as_deref())
+        .and_then(runtime::by_id)
+    else {
+        return Ok(false);
+    };
+    let file = previous.containerd_file(distribution);
     let Ok(content) = fs::read_to_string(&file.path) else {
         return Ok(false);
     };
@@ -529,16 +541,30 @@ fn remove_gvisor_file(distribution: Distribution) -> Result<bool, InstallError> 
     Ok(true)
 }
 
-/// Creates the `RuntimeClass` when gVisor is on, and removes the installer's when it is off.
-fn apply_gvisor_runtime_class(kubectl: &Kubectl, plan: &Plan) -> Result<(), InstallError> {
-    if let Some(gvisor) = &plan.gvisor {
-        kubectl.apply_object(&gvisor.runtime_class)?;
+/// Creates the `RuntimeClass` when a runtime is on, and removes the recorded one's when none is.
+fn apply_runtime_class(kubectl: &Kubectl, plan: &Plan) -> Result<(), InstallError> {
+    if let Some(runtime) = &plan.runtime {
+        kubectl.apply_object(&runtime.runtime_class)?;
+        let handler = runtime
+            .runtime_class
+            .get("handler")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         out::err(&format!(
-            "    RuntimeClass {GVISOR_RUNTIMECLASS} (handler runsc)"
+            "    RuntimeClass {} (handler {handler})",
+            runtime.id
         ));
         return Ok(());
     }
-    let Some(existing) = kubectl.get("runtimeclass", GVISOR_RUNTIMECLASS, None)? else {
+    let Some(previous) = plan
+        .facts
+        .record
+        .as_ref()
+        .and_then(|record| record.runtime.as_deref())
+    else {
+        return Ok(());
+    };
+    let Some(existing) = kubectl.get("runtimeclass", previous, None)? else {
         return Ok(());
     };
     let managed = existing
@@ -550,15 +576,10 @@ fn apply_gvisor_runtime_class(kubectl: &Kubectl, plan: &Plan) -> Result<(), Inst
         return Ok(());
     }
     kubectl.run(
-        &[
-            "delete",
-            "runtimeclass",
-            GVISOR_RUNTIMECLASS,
-            "--ignore-not-found",
-        ],
+        &["delete", "runtimeclass", previous, "--ignore-not-found"],
         None,
     )?;
-    out::err(&format!("    removed RuntimeClass {GVISOR_RUNTIMECLASS}"));
+    out::err(&format!("    removed RuntimeClass {previous}"));
     Ok(())
 }
 
