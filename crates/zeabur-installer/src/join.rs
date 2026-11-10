@@ -12,7 +12,7 @@ use zeabur_installer_host::{facts, files, network, systemd};
 use zeabur_installer_plan::cluster::{AUTHN_CONFIGMAP, Distribution};
 use zeabur_installer_plan::config::{self, JoinConfig, Role};
 use zeabur_installer_plan::join::{self, JoinFacts, JoinPlan, Latency, RTT_SAMPLES};
-use zeabur_installer_plan::{runtime, storage};
+use zeabur_installer_plan::storage;
 
 use crate::apply::{self, ClusterInstall};
 use crate::{InstallError, load, node, out, render};
@@ -289,13 +289,10 @@ pub(crate) fn doctor(config: &JoinConfig) -> ExitCode {
         );
     }
 
-    if let Some(selected) = runtime::enabled(config.host.gvisor) {
-        results.push(crate::doctor::runtime_local(
-            distribution,
-            selected,
-            Some(selected.version()),
-        ));
-    }
+    results.extend(crate::doctor::runtime_local_on(
+        config.host.gvisor,
+        distribution,
+    ));
 
     if config.join.role == Role::Server {
         let admin = Kubectl::admin(distribution);

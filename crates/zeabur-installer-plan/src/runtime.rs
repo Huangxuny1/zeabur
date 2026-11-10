@@ -80,6 +80,15 @@ pub fn enabled(on: bool) -> Option<&'static dyn Runtime> {
     on.then_some(&GVISOR)
 }
 
+/// Checks the runtime a configuration turns on.
+///
+/// # Errors
+///
+/// When the runtime refuses the install.
+pub fn check(on: bool, install: Install<'_>) -> Result<(), PlanError> {
+    enabled(on).map_or(Ok(()), |runtime| runtime.check(install))
+}
+
 /// The runtime plan for `arch`, when the configuration turns a runtime on.
 ///
 /// # Errors

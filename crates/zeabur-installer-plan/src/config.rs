@@ -178,9 +178,7 @@ impl PersonalConfig {
                     .to_owned(),
             ));
         }
-        if let Some(selected) = runtime::enabled(self.host.gvisor) {
-            selected.check(runtime::Install::Personal)?;
-        }
+        runtime::check(self.host.gvisor, runtime::Install::Personal)?;
         self.host.check()
     }
 }
@@ -450,11 +448,12 @@ impl JoinConfig {
             self.rke2_version.as_ref(),
             self.k3s_version.as_ref(),
         )?;
-        if let Some(selected) = runtime::enabled(self.host.gvisor) {
-            selected.check(runtime::Install::Team {
+        runtime::check(
+            self.host.gvisor,
+            runtime::Install::Team {
                 version: self.version(),
-            })?;
-        }
+            },
+        )?;
         if join.role == Role::Server && !self.distribution.takes_servers() {
             return Err(PlanError::SecondServer);
         }
@@ -743,11 +742,12 @@ impl Config {
             self.rke2_version.as_ref(),
             self.k3s_version.as_ref(),
         )?;
-        if let Some(selected) = runtime::enabled(self.host.gvisor) {
-            selected.check(runtime::Install::Team {
+        runtime::check(
+            self.host.gvisor,
+            runtime::Install::Team {
                 version: self.version(),
-            })?;
-        }
+            },
+        )?;
         if !matches!(self.profile.as_str(), "single-node" | "multi-node") {
             return Err(PlanError::Config(format!(
                 "profile `{}` is not single-node or multi-node",

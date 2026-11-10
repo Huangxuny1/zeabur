@@ -99,6 +99,12 @@ pub(crate) fn runtime_local(
     )
 }
 
+/// The local check of the runtime a configuration turns on, when it turns one on.
+pub(crate) fn runtime_local_on(on: bool, distribution: Distribution) -> Option<(Status, String)> {
+    runtime::enabled(on)
+        .map(|runtime| runtime_local(distribution, runtime, Some(runtime.version())))
+}
+
 /// Whether the recorded runtime is installed.
 fn runtime_check(kubectl: &Kubectl, distribution: Distribution, plan: &Value) -> (Status, String) {
     let Some(id) = plan.pointer("/runtime/id").and_then(Value::as_str) else {
