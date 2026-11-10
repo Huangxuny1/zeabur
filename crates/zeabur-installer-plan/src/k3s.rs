@@ -57,6 +57,9 @@ pub fn host_files(options: &Options) -> Vec<HostFile> {
             content: system_objects(),
         },
     ];
+    if options.gvisor {
+        files.push(K3S.containerd_runtime_file());
+    }
     if options.identity {
         files.push(HostFile {
             path: format!("{dir}/config.yaml.d/50-zeabur-identity.yaml"),
@@ -77,8 +80,8 @@ pub fn host_files(options: &Options) -> Vec<HostFile> {
 
 /// The files of a worker: the kernel parameters and the kubelet settings of the server.
 #[must_use]
-pub fn agent_files() -> Vec<HostFile> {
-    vec![
+pub fn agent_files(gvisor: bool) -> Vec<HostFile> {
+    let mut files = vec![
         K3S.sysctl(),
         HostFile {
             path: format!("{}/config.yaml", K3S.layout().config_dir),
@@ -88,7 +91,11 @@ pub fn agent_files() -> Vec<HostFile> {
                 K3S.kubelet_args(false)
             ),
         },
-    ]
+    ];
+    if gvisor {
+        files.push(K3S.containerd_runtime_file());
+    }
+    files
 }
 
 fn config(options: &Options) -> String {
@@ -271,6 +278,7 @@ mod tests {
             tls_san: vec!["k8s.example.com".to_owned()],
             disable: vec!["metrics-server".to_owned()],
             identity,
+            gvisor: false,
         }
     }
 
@@ -386,7 +394,7 @@ mod tests {
 
     #[test]
     fn agents_get_the_kubelet_settings_and_no_server_keys() {
-        let files = agent_files();
+        let files = agent_files(false);
         assert_eq!(files[0], K3S.sysctl());
         let config = yaml(&files[1].content);
         assert_eq!(config["protect-kernel-defaults"], true);
@@ -428,5 +436,20 @@ mod tests {
             assert!(out.contains(&format!("image: {tag}@{digest}\n")));
         }
         assert!(calico_manifest("kind: DaemonSet\n").is_err());
+    }
+
+    #[test]
+    fn gvisor_adds_the_containerd_drop_in() {
+        let drop_in = K3S.containerd_runtime_file();
+        assert_eq!(
+            drop_in.path,
+            "/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d/99-gvisor.toml"
+        );
+        assert!(drop_in.content.contains("io.containerd.runsc.v1"));
+        let mut server = options(true);
+        server.gvisor = true;
+        assert!(host_files(&server).contains(&drop_in));
+        assert!(agent_files(true).contains(&drop_in));
+        assert!(!agent_files(false).contains(&drop_in));
     }
 }

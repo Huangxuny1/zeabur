@@ -138,6 +138,7 @@ pub(crate) fn apply(config: &JoinConfig) -> Result<(), InstallError> {
         plan.node_prep.as_ref(),
     )?;
     let prepared = apply::prepare_node(plan.node_prep.as_ref())?;
+    apply::install_runtime(plan.runtime.as_ref())?;
 
     let distribution = plan.cluster.distribution;
     let layout = distribution.layout();
@@ -287,6 +288,11 @@ pub(crate) fn doctor(config: &JoinConfig) -> ExitCode {
                 .map(|c| (c.status, c.detail)),
         );
     }
+
+    results.extend(crate::doctor::runtime_local_on(
+        config.host.gvisor,
+        distribution,
+    ));
 
     if config.join.role == Role::Server {
         let admin = Kubectl::admin(distribution);

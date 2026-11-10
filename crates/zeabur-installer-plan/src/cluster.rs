@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::pins::{K3S, RKE2};
+use crate::runtime::Runtime as _;
 
 /// A team install's Kubernetes distribution.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -41,6 +42,9 @@ pub struct Layout {
     pub kubectl: &'static str,
     /// Archives the distribution imports into containerd on every start.
     pub images_dir: &'static str,
+    /// The directory containerd reads its configuration from. K3s and RKE2 1.36 ship containerd
+    /// 2, which reads `config-v3.toml` and its `config-v3.toml.d` drop-ins.
+    pub containerd_dir: &'static str,
     /// The join token of a joining node, mode 0600.
     pub join_token_file: &'static str,
     /// A server's own token; it joins servers and workers.
@@ -73,6 +77,7 @@ const K3S_LAYOUT: Layout = Layout {
     admin_kubeconfig: "/etc/rancher/k3s/k3s.yaml",
     kubectl: "/var/lib/rancher/k3s/data/current/bin/kubectl",
     images_dir: "/var/lib/rancher/k3s/agent/images",
+    containerd_dir: "/var/lib/rancher/k3s/agent/etc/containerd",
     join_token_file: "/etc/rancher/k3s/zeabur-join-token",
     server_token_file: "/var/lib/rancher/k3s/server/token",
     kubelet_kubeconfig: "/var/lib/rancher/k3s/agent/kubelet.kubeconfig",
@@ -92,6 +97,7 @@ const RKE2_LAYOUT: Layout = Layout {
     admin_kubeconfig: "/etc/rancher/rke2/rke2.yaml",
     kubectl: "/var/lib/rancher/rke2/bin/kubectl",
     images_dir: "/var/lib/rancher/rke2/agent/images",
+    containerd_dir: "/var/lib/rancher/rke2/agent/etc/containerd",
     join_token_file: "/etc/rancher/rke2/zeabur-join-token",
     server_token_file: "/var/lib/rancher/rke2/server/token",
     kubelet_kubeconfig: "/var/lib/rancher/rke2/agent/kubelet.kubeconfig",
@@ -424,11 +430,17 @@ impl Distribution {
 
     /// The files of a worker.
     #[must_use]
-    pub fn agent_files(self) -> Vec<HostFile> {
+    pub fn agent_files(self, gvisor: bool) -> Vec<HostFile> {
         match self {
-            Self::K3s => crate::k3s::agent_files(),
-            Self::Rke2 => crate::rke2::agent_files(),
+            Self::K3s => crate::k3s::agent_files(gvisor),
+            Self::Rke2 => crate::rke2::agent_files(gvisor),
         }
+    }
+
+    /// The containerd drop-in that registers the alternative runtime.
+    #[must_use]
+    pub fn containerd_runtime_file(self) -> HostFile {
+        crate::runtime::GVISOR.containerd_file(self)
     }
 
     /// The kernel parameters `protect-kernel-defaults` makes the kubelet check; it refuses to
@@ -552,6 +564,8 @@ pub struct Options {
     pub disable: Vec<String>,
     /// Zeabur Identity is installed, so kube-apiserver reads its issuer.
     pub identity: bool,
+    /// An alternative runtime is installed, so containerd gets it.
+    pub gvisor: bool,
 }
 
 /// The `ConfigMap` in `kube-system` holding the authentication configuration, for servers that

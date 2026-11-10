@@ -41,6 +41,8 @@ pub struct Record {
     pub identity_version: Option<String>,
     /// Zeabur's release; `None` from an older installer or a development source.
     pub zeabur_version: Option<String>,
+    /// The alternative runtime the recorded plan had, by id.
+    pub runtime: Option<String>,
 }
 
 impl Record {
@@ -114,6 +116,10 @@ impl Record {
                 .map(str::to_owned),
             zeabur_version: plan
                 .pointer("/zeabur/version")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            runtime: plan
+                .pointer("/runtime/id")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
         })
@@ -431,6 +437,7 @@ mod tests {
             zeabur: None,
             identity_version: None,
             zeabur_version: None,
+            runtime: None,
         };
         let error = record.check_installer().unwrap_err().to_string();
         assert!(

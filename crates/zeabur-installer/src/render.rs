@@ -27,6 +27,15 @@ pub(crate) fn plan(plan: &Plan) -> String {
     );
     node_name(&mut s, &plan.node_name);
     node_addresses(&mut s, &plan.facts.node_ips);
+    if let Some(runtime) = &plan.runtime {
+        push(
+            &mut s,
+            &format!(
+                "{:<17}{} (RuntimeClass {})",
+                runtime.display_name, runtime.version, runtime.id
+            ),
+        );
+    }
     push(&mut s, "");
     s.push_str(&changes(
         plan.changes.as_ref(),
@@ -353,6 +362,15 @@ pub(crate) fn join_plan(plan: &JoinPlan) -> String {
              already in the cluster."
         ),
     );
+    if let Some(runtime) = &plan.runtime {
+        push(
+            &mut s,
+            &format!(
+                "{:<17}{} (RuntimeClass {})",
+                runtime.display_name, runtime.version, runtime.id
+            ),
+        );
+    }
     node_name(&mut s, &plan.node_name);
     node_addresses(&mut s, &plan.facts.node_ips);
     push(&mut s, "");

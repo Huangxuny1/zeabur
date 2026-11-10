@@ -18,6 +18,7 @@ use crate::config::{AccessMode, Config, Sources};
 use crate::pins::{self, CALICO, K3S, K3s, RKE2};
 use crate::record::{Changes, Planned, Record};
 use crate::remove::Removal;
+use crate::runtime::{self, RuntimePlan};
 use crate::select::{self, Selection, Target, Why};
 use crate::storage::{self, NodePrep, Storage};
 use crate::{PlanError, node_name, values};
@@ -124,6 +125,8 @@ pub struct Plan {
     pub node_name: String,
     /// The Kubernetes release.
     pub cluster: ClusterPlan,
+    /// The alternative runtime, when `host.gvisor` is on.
+    pub runtime: Option<RuntimePlan>,
     /// Calico's manifest, applied once K3s's API answers; `None` on RKE2, which brings Canal.
     pub calico: Option<Download>,
     /// Files written before K3s or RKE2 starts.
@@ -210,6 +213,22 @@ impl ClusterPlan {
             .chain(&self.images)
             .chain(&self.install_script)
     }
+}
+
+/// A warning when the record has a runtime the plan no longer does.
+fn runtime_removed(facts: &Facts, runtime: Option<&RuntimePlan>) -> Option<Warning> {
+    let previous = facts.record.as_ref()?.runtime.as_deref()?;
+    runtime.is_none().then(|| {
+        let name = runtime::by_id(previous).map_or(previous, |r| r.display_name());
+        warning(
+            "runtime.removed",
+            &[],
+            format!(
+                "{name} is no longer enabled: apply removes its containerd configuration and \
+                 RuntimeClass, and restarts the cluster."
+            ),
+        )
+    })
 }
 
 /// One download.
@@ -621,6 +640,9 @@ pub fn plan_with(
     ));
 
     let cluster = cluster_plan(distribution, config.version(), &facts.arch, &mut warnings)?;
+    let mirror = config.sources.gvisor_mirror.as_deref();
+    let runtime = runtime::plan(config.host.gvisor, &facts.arch, mirror)?;
+    warnings.extend(runtime_removed(facts, runtime.as_ref()));
     let kubernetes = distribution.kubernetes();
     if !index
         .kubernetes
@@ -689,6 +711,7 @@ pub fn plan_with(
         facts: facts.clone(),
         node_name,
         cluster,
+        runtime,
         calico: (distribution == Distribution::K3s).then(|| CALICO.manifest().into()),
         host_file_paths: host_files.iter().map(|f| f.path.clone()).collect(),
         host_files,
@@ -1414,6 +1437,7 @@ fn server_files(
         tls_san: config.host.tls_san.clone(),
         disable: packaged_to_disable(distribution, chosen),
         identity: config.zeabur,
+        gvisor: config.host.gvisor,
     });
     files.push(distribution.node_name_file(node_name));
     files.extend(distribution.node_ip_file(&facts.node_ips));
@@ -3269,5 +3293,39 @@ mod tests {
             let stacked = plan(&index, &config(extra), &restricted).unwrap();
             assert!(stacked.host_files.contains(&cluster::apparmor_profile()));
         }
+    }
+
+    #[test]
+    fn the_runtime_plan_pins_the_tarball_for_the_arch_and_the_runtime_class() {
+        use crate::runtime::Runtime as _;
+
+        let amd64 = runtime::GVISOR.plan("amd64", None).unwrap();
+        assert_eq!(amd64.version, runtime::GVISOR.version());
+        assert_eq!(amd64.download.file, "gvisor-x86_64.tar.bz2");
+        assert_eq!(
+            amd64.download.sha256.as_deref(),
+            Some("6f6b1a8f0f4665a403238135167d0d990bfaeaff5544abf68f5e0d822b35484a")
+        );
+        assert_eq!(amd64.runtime_class["metadata"]["name"], "gvisor");
+        assert_eq!(amd64.runtime_class["handler"], "runsc");
+        assert_eq!(
+            runtime::GVISOR.plan("arm64", None).unwrap().download.file,
+            "gvisor-aarch64.tar.bz2"
+        );
+        assert!(runtime::GVISOR.plan("riscv64", None).is_err());
+        assert!(runtime::enabled(false).is_none());
+
+        let mirror = runtime::GVISOR
+            .plan("amd64", Some("https://mirror.example.com/gvisor/"))
+            .unwrap();
+        assert_eq!(
+            mirror.download.url,
+            "https://mirror.example.com/gvisor/release-20261102.0/gvisor-x86_64.tar.bz2"
+        );
+        assert!(
+            runtime::GVISOR
+                .plan("amd64", Some("mirror.example.com"))
+                .is_err()
+        );
     }
 }

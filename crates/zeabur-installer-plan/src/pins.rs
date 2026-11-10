@@ -129,6 +129,53 @@ pub fn k3s_install_script_url(version: &str) -> String {
     )
 }
 
+/// A gVisor release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Gvisor {
+    /// `release-20261102.0`.
+    pub version: &'static str,
+    /// SHA-256 per architecture.
+    pub amd64: GvisorFiles,
+    /// SHA-256 per architecture.
+    pub arm64: GvisorFiles,
+}
+
+/// The files of one architecture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GvisorFiles {
+    /// `gvisor-<arch>.tar.bz2`.
+    pub tarball: &'static str,
+}
+
+/// The gVisor release this installer installs.
+pub static GVISOR: Gvisor = Gvisor {
+    version: "release-20261102.0",
+    amd64: GvisorFiles {
+        tarball: "6f6b1a8f0f4665a403238135167d0d990bfaeaff5544abf68f5e0d822b35484a",
+    },
+    arm64: GvisorFiles {
+        tarball: "909c95f245a46000d3bb0d5285f07dde23597056e7c3a4aab758b218e95bdab0",
+    },
+};
+
+impl Gvisor {
+    /// The tarball of an architecture (`amd64`, `arm64`), from `mirror` or GitHub.
+    #[must_use]
+    pub fn tarball(&self, arch: &str, mirror: Option<&str>) -> Option<Asset> {
+        let (file, sha256) = match arch {
+            "amd64" => ("gvisor-x86_64.tar.bz2", self.amd64.tarball),
+            "arm64" => ("gvisor-aarch64.tar.bz2", self.arm64.tarball),
+            _ => return None,
+        };
+        let base = mirror.unwrap_or("https://github.com/google/gvisor/releases/download");
+        Some(Asset {
+            url: format!("{base}/{}/{file}", self.version),
+            file: file.to_owned(),
+            sha256,
+        })
+    }
+}
+
 /// Calico, the network of a K3s cluster: the release RKE2's Canal carries, with VXLAN.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Calico {

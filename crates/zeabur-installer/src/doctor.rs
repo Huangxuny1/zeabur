@@ -1,6 +1,7 @@
 //! `doctor`: checks the install, with the exit codes of the Nagios plugin convention, as
 //! `zeaburctl doctor` uses them: 0 OK, 1 warning, 2 critical, 3 when the checks cannot run.
 
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -8,10 +9,11 @@ use serde_json::Value;
 use zeabur_installer_host::kubectl::Kubectl;
 use zeabur_installer_host::nodeprep::{self, Stage};
 use zeabur_installer_host::preflight::{self, Encryption, Status};
-use zeabur_installer_host::{facts, systemd};
+use zeabur_installer_host::{cmd, facts, systemd};
 use zeabur_installer_plan::catalog::Health;
 use zeabur_installer_plan::cluster::Distribution;
 use zeabur_installer_plan::plan::{IDENTITY_NAMESPACE, ZEABUR_NAMESPACE};
+use zeabur_installer_plan::runtime::{self, Runtime};
 use zeabur_installer_plan::storage;
 
 use crate::apply::STATE_CONFIGMAP;
@@ -47,6 +49,117 @@ fn policies(kubectl: &Kubectl, distribution: Distribution) -> (Status, String) {
     }
 }
 
+/// Whether the runtime's files and containerd drop-in are on this node.
+pub(crate) fn runtime_local(
+    distribution: Distribution,
+    runtime: &dyn Runtime,
+    version: Option<&str>,
+) -> (Status, String) {
+    for path in runtime.paths() {
+        if !Path::new(path).exists() {
+            return (
+                Status::Fail,
+                format!(
+                    "{} is missing {path}: run zeabur-installer apply",
+                    runtime.display_name()
+                ),
+            );
+        }
+    }
+    let file = runtime.containerd_file(distribution);
+    if std::fs::read_to_string(&file.path).ok().as_deref() != Some(file.content.as_str()) {
+        return (
+            Status::Fail,
+            format!(
+                "{} is missing or differs: run zeabur-installer apply",
+                file.path
+            ),
+        );
+    }
+    let Some(version) = version else {
+        return (
+            Status::Pass,
+            format!("{} is installed", runtime.display_name()),
+        );
+    };
+    let installed = cmd::run(runtime.binary(), &["--version"], None).unwrap_or_default();
+    if !installed.contains(version) {
+        return (
+            Status::Warn,
+            format!(
+                "{} is not {version} ({}): run zeabur-installer apply",
+                runtime.display_name(),
+                installed.lines().next().unwrap_or_default()
+            ),
+        );
+    }
+    (
+        Status::Pass,
+        format!("{} {version} is installed", runtime.display_name()),
+    )
+}
+
+/// The local check of the runtime a configuration turns on, when it turns one on.
+pub(crate) fn runtime_local_on(on: bool, distribution: Distribution) -> Option<(Status, String)> {
+    runtime::enabled(on)
+        .map(|runtime| runtime_local(distribution, runtime, Some(runtime.version())))
+}
+
+/// Whether the recorded runtime is installed.
+fn runtime_check(kubectl: &Kubectl, distribution: Distribution, plan: &Value) -> (Status, String) {
+    let Some(id) = plan.pointer("/runtime/id").and_then(Value::as_str) else {
+        return (Status::Pass, "no alternative runtime is enabled".to_owned());
+    };
+    let Some(runtime) = runtime::by_id(id) else {
+        return (
+            Status::Warn,
+            format!("the record names the runtime {id}, which this installer does not know"),
+        );
+    };
+    let version = plan
+        .pointer("/runtime/version")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| runtime.version());
+    let local = runtime_local(distribution, runtime, Some(version));
+    if local.0 != Status::Pass {
+        return local;
+    }
+    match kubectl.get("runtimeclass", runtime.id(), None) {
+        Ok(Some(object))
+            if object.get("handler").and_then(Value::as_str) == Some(runtime.handler()) =>
+        {
+            (
+                Status::Pass,
+                format!(
+                    "{} {version} is installed and RuntimeClass {} uses {}",
+                    runtime.display_name(),
+                    runtime.id(),
+                    runtime.handler()
+                ),
+            )
+        }
+        Ok(Some(_)) => (
+            Status::Fail,
+            format!(
+                "RuntimeClass {} does not use handler {}",
+                runtime.id(),
+                runtime.handler()
+            ),
+        ),
+        Ok(None) => (
+            Status::Fail,
+            format!(
+                "RuntimeClass {} is missing: run zeabur-installer apply",
+                runtime.id()
+            ),
+        ),
+        Err(e) => (
+            Status::Warn,
+            format!("reading RuntimeClass {}: {e}", runtime.id()),
+        ),
+    }
+}
+
 pub(crate) fn run() -> ExitCode {
     if let Some(code) = cannot_run() {
         return code;
@@ -79,6 +192,7 @@ pub(crate) fn run() -> ExitCode {
                 .unwrap_or_default();
             results.extend(components(&kubectl, &plan));
             results.push(default_class(&kubectl, &plan));
+            results.push(runtime_check(&kubectl, distribution, &plan));
             if plan.get("nodePrep").is_some_and(|p| !p.is_null()) {
                 results.extend(
                     nodeprep::check(&storage::LONGHORN_PREP, Stage::After)
